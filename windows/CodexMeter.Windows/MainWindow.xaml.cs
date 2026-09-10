@@ -245,14 +245,12 @@ public partial class MainWindow : Window
     {
         var requestedWidth = message.TryGetProperty("width", out var widthValue) ? widthValue.GetDouble() : Width;
         var requestedHeight = message.TryGetProperty("height", out var heightValue) ? heightValue.GetDouble() : Height;
-        var newWidth = Math.Clamp(requestedWidth, 66, 360);
-        var newHeight = Math.Clamp(requestedHeight, 66, 560);
-        var right = Left + ActualWidth;
+        var frame = PanelLayout.ResizeKeepingTopLeft(Left, Top, requestedWidth, requestedHeight);
 
-        Width = newWidth;
-        Height = newHeight;
-        Left = right - newWidth;
-        ClampToCurrentWorkArea();
+        Width = frame.Width;
+        Height = frame.Height;
+        Left = frame.Left;
+        Top = frame.Top;
     }
 
     private void BeginNativeDrag()
