@@ -2,6 +2,16 @@
 
 A lightweight, native macOS usage widget for Codex. It starts as a draggable icon, expands on hover, and collapses when the pointer leaves.
 
+![Codex Meter in light mode](assets/screenshots/codex-meter-light.jpg)
+
+## Download
+
+[Download Codex Meter v1.0.0 for Apple Silicon](https://github.com/Liz-509/Codex-Meter/releases/download/v1.0.0/Codex-Meter-macOS-arm64-v1.0.0.zip)
+
+Unzip the archive, move `Codex Meter.app` to your Applications folder, and open it. The prebuilt download supports Apple Silicon Macs (`arm64`). Intel Mac users can build from source.
+
+Because the app is not notarized, macOS may ask you to confirm the first launch. Control-click the app, choose **Open**, then confirm **Open**.
+
 ## Features
 
 - Shows the five-hour limit, weekly limit, reset times, and available reset credits.
@@ -11,6 +21,12 @@ A lightweight, native macOS usage widget for Codex. It starts as a draggable ico
 - Remains interactive when another app is in front.
 - Includes animated quota indicators and button micro-interactions.
 - Runs locally without login items or Codex lifecycle hooks.
+
+## Appearance
+
+Codex Meter follows the system appearance by default and can also be locked to light or dark mode.
+
+![Codex Meter in dark mode](assets/screenshots/codex-meter-dark.jpg)
 
 ## Requirements
 
