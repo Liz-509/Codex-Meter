@@ -45,8 +45,8 @@ const hostBridge = {
     }
     window.webkit?.messageHandlers?.panel?.postMessage({ action: "quit" });
   },
-  beginDrag() {
-    window.codexMeterBridge?.beginDrag?.();
+  beginDrag(payload) {
+    window.codexMeterBridge?.beginDrag?.(payload);
   },
 };
 
@@ -263,7 +263,8 @@ class CodexUsageWidget extends HTMLElement {
     this.addEventListener("mouseenter", enter);
     this.addEventListener("mouseleave", leave);
     this.addEventListener("pointerdown", (event) => {
-      if (this.collapsed && event.button === 0) hostBridge.beginDrag();
+      if (event.button !== 0 || !event.isPrimary) return;
+      hostBridge.beginDrag({ x: event.clientX, y: event.clientY });
     });
   }
 

@@ -6,6 +6,23 @@ namespace CodexMeter.Windows.Tests;
 public sealed class PanelLayoutTests
 {
     [TestMethod]
+    public void IsDragHandle_AcceptsIconAreaWhilePanelIsExpanded()
+    {
+        Assert.IsTrue(PanelLayout.IsDragHandle(32, 32));
+        Assert.IsTrue(PanelLayout.IsDragHandle(0, 0));
+        Assert.IsTrue(PanelLayout.IsDragHandle(65.99, 65.99));
+    }
+
+    [TestMethod]
+    public void IsDragHandle_RejectsExpandedPanelContentAndInvalidCoordinates()
+    {
+        Assert.IsFalse(PanelLayout.IsDragHandle(66, 20));
+        Assert.IsFalse(PanelLayout.IsDragHandle(20, 66));
+        Assert.IsFalse(PanelLayout.IsDragHandle(-1, 20));
+        Assert.IsFalse(PanelLayout.IsDragHandle(double.NaN, 20));
+    }
+
+    [TestMethod]
     public void ResizeKeepingTopLeft_DoesNotMovePanelBackIntoWorkArea()
     {
         var frame = PanelLayout.ResizeKeepingTopLeft(
