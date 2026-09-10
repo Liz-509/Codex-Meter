@@ -1,0 +1,99 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", Inter, sans-serif;
+  color: #152037;
+  background: #eef2f8;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  overflow: hidden;
+}
+
+.demo-page {
+  min-height: 100vh;
+  display: grid;
+  align-items: center;
+  padding: clamp(36px, 7vw, 110px);
+  background:
+    radial-gradient(circle at 75% 20%, rgba(126, 153, 255, 0.25), transparent 29%),
+    radial-gradient(circle at 18% 85%, rgba(104, 218, 191, 0.22), transparent 30%),
+    linear-gradient(135deg, #fafcff 0%, #eef2f9 52%, #e8edf6 100%);
+}
+
+.demo-page::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.45;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.035'/%3E%3C/svg%3E");
+}
+
+.demo-copy {
+  max-width: 680px;
+}
+
+.eyebrow {
+  color: #5d6b83;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+}
+
+h1 {
+  max-width: 620px;
+  margin: 18px 0 22px;
+  color: #152037;
+  font-size: clamp(48px, 7.2vw, 92px);
+  font-weight: 650;
+  letter-spacing: -0.065em;
+  line-height: 0.98;
+}
+
+.demo-copy p {
+  margin: 0;
+  color: #6b7589;
+  font-size: 18px;
+  letter-spacing: -0.02em;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #edf1f9;
+    background: #0b0e14;
+  }
+
+  .demo-page {
+    background:
+      radial-gradient(circle at 74% 15%, rgba(88, 119, 255, 0.18), transparent 30%),
+      radial-gradient(circle at 15% 85%, rgba(70, 184, 153, 0.13), transparent 30%),
+      linear-gradient(135deg, #151923 0%, #0c1017 50%, #090c12 100%);
+  }
+
+  h1 {
+    color: #f3f6fc;
+  }
+
+  .eyebrow,
+  .demo-copy p {
+    color: #8994a9;
+  }
+}
+
+@media (max-width: 720px) {
+  .demo-page {
+    align-items: start;
+    padding: 56px 28px;
+  }
+
+  h1 {
+    font-size: 48px;
+  }
+}
