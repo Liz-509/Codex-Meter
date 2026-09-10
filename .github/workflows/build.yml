@@ -24,11 +24,11 @@ jobs:
       - name: Package app
         run: |
           mkdir -p outputs
-          ditto -c -k --keepParent "build/Codex Meter.app" "outputs/Codex-Meter-macOS-arm64-v1.1.1.zip"
+          ditto -c -k --keepParent "build/Codex Meter.app" "outputs/Codex-Meter-macOS-arm64-v1.1.2.zip"
       - uses: actions/upload-artifact@v4
         with:
-          name: Codex-Meter-macOS-arm64-v1.1.1
-          path: outputs/Codex-Meter-macOS-arm64-v1.1.1.zip
+          name: Codex-Meter-macOS-arm64-v1.1.2
+          path: outputs/Codex-Meter-macOS-arm64-v1.1.2.zip
           if-no-files-found: error
 
   windows:
@@ -46,12 +46,12 @@ jobs:
         run: dotnet test windows/CodexMeter.Windows.Tests/CodexMeter.Windows.Tests.csproj --configuration Release --no-restore
       - name: Build portable package
         shell: pwsh
-        run: ./scripts/build-windows.ps1 -Version 1.1.1
+        run: ./scripts/build-windows.ps1 -Version 1.1.2
       - name: Smoke test packaged app
         shell: pwsh
         run: |
           $smokeDirectory = Join-Path $env:RUNNER_TEMP "codex-meter-smoke"
-          Expand-Archive outputs/Codex-Meter-Windows-x64-v1.1.1.zip $smokeDirectory
+          Expand-Archive outputs/Codex-Meter-Windows-x64-v1.1.2.zip $smokeDirectory
           $process = Start-Process `
             -FilePath (Join-Path $smokeDirectory "Codex Meter.exe") `
             -ArgumentList "--self-test" `
@@ -62,6 +62,6 @@ jobs:
           }
       - uses: actions/upload-artifact@v4
         with:
-          name: Codex-Meter-Windows-x64-v1.1.1
-          path: outputs/Codex-Meter-Windows-x64-v1.1.1.zip
+          name: Codex-Meter-Windows-x64-v1.1.2
+          path: outputs/Codex-Meter-Windows-x64-v1.1.2.zip
           if-no-files-found: error

@@ -17,7 +17,7 @@ namespace CodexMeter.Windows;
 
 public partial class MainWindow : Window
 {
-    private const int WmNcLeftButtonDown = 0x00A1;
+    private const uint WmNcLeftButtonDown = 0x00A1;
     private const int HtCaption = 0x0002;
     private static readonly TimeSpan[] RetryDelays =
     [
@@ -115,8 +115,8 @@ public partial class MainWindow : Window
               quit() {
                 window.chrome.webview.postMessage({ action: 'quit' });
               },
-              beginDrag() {
-                window.chrome.webview.postMessage({ action: 'beginDrag' });
+              beginDrag(payload) {
+                window.chrome.webview.postMessage({ action: 'beginDrag', ...payload });
               }
             };
             """);
@@ -156,7 +156,7 @@ public partial class MainWindow : Window
                     ResizePanel(root);
                     break;
                 case "beginDrag":
-                    BeginNativeDrag();
+                    BeginNativeDrag(root);
                     break;
                 case "quit":
                     ExitApplication();
@@ -253,12 +253,27 @@ public partial class MainWindow : Window
         Top = frame.Top;
     }
 
-    private void BeginNativeDrag()
+    private void BeginNativeDrag(JsonElement message)
     {
+        if (!message.TryGetProperty("x", out var xValue) ||
+            !message.TryGetProperty("y", out var yValue) ||
+            !xValue.TryGetDouble(out var x) ||
+            !yValue.TryGetDouble(out var y) ||
+            !PanelLayout.IsDragHandle(x, y))
+        {
+            return;
+        }
+
         var handle = new WindowInteropHelper(this).Handle;
-        if (handle == IntPtr.Zero) return;
+        if (handle == IntPtr.Zero || !GetCursorPos(out var cursor)) return;
         ReleaseCapture();
-        SendMessage(handle, WmNcLeftButtonDown, HtCaption, 0);
+        SendMessage(handle, WmNcLeftButtonDown, (nint)HtCaption, PackScreenPoint(cursor));
+    }
+
+    private static nint PackScreenPoint(NativePoint point)
+    {
+        var packed = (uint)(ushort)point.X | ((uint)(ushort)point.Y << 16);
+        return unchecked((nint)packed);
     }
 
     private void PositionInitially()
@@ -352,5 +367,16 @@ public partial class MainWindow : Window
     private static extern bool ReleaseCapture();
 
     [DllImport("user32.dll")]
-    private static extern IntPtr SendMessage(IntPtr hWnd, int message, int wParam, int lParam);
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetCursorPos(out NativePoint point);
+
+    [DllImport("user32.dll")]
+    private static extern nint SendMessage(IntPtr hWnd, uint message, nint wParam, nint lParam);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int X;
+        public int Y;
+    }
 }
