@@ -23,6 +23,33 @@ const DEFAULT_DATA = {
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
+const hostBridge = {
+  getUsage() {
+    return window.codexMeterBridge?.getUsage?.() ?? window.codexUsageBridge?.getUsage?.();
+  },
+  resize(payload) {
+    if (window.codexMeterBridge?.resize) {
+      window.codexMeterBridge.resize(payload);
+      return true;
+    }
+    if (window.webkit?.messageHandlers?.panel) {
+      window.webkit.messageHandlers.panel.postMessage({ action: "resize", ...payload });
+      return true;
+    }
+    return false;
+  },
+  quit() {
+    if (window.codexMeterBridge?.quit) {
+      window.codexMeterBridge.quit();
+      return;
+    }
+    window.webkit?.messageHandlers?.panel?.postMessage({ action: "quit" });
+  },
+  beginDrag() {
+    window.codexMeterBridge?.beginDrag?.();
+  },
+};
+
 class CodexUsageWidget extends HTMLElement {
   constructor() {
     super();
@@ -50,8 +77,8 @@ class CodexUsageWidget extends HTMLElement {
     this.setLoading(true);
     try {
       let payload;
-      if (window.codexUsageBridge?.getUsage) {
-        payload = await window.codexUsageBridge.getUsage();
+      if (window.codexMeterBridge?.getUsage || window.codexUsageBridge?.getUsage) {
+        payload = await hostBridge.getUsage();
       } else {
         const response = await fetch("/api/usage", { headers: { Accept: "application/json" } });
         if (response.ok && response.headers.get("content-type")?.includes("application/json")) {
@@ -187,7 +214,7 @@ class CodexUsageWidget extends HTMLElement {
       const action = event.target.closest("[data-action]")?.dataset.action;
       if (action === "theme") this.cycleTheme();
       if (action === "refresh") this.refresh();
-      if (action === "close") window.webkit?.messageHandlers?.panel?.postMessage({ action: "quit" });
+      if (action === "close") hostBridge.quit();
       if (action === "collapse") {
         this.collapsed = !this.collapsed;
         localStorage.setItem("codex-widget-collapsed", String(this.collapsed));
@@ -235,6 +262,9 @@ class CodexUsageWidget extends HTMLElement {
     window.codexUsageHoverLeave = leave;
     this.addEventListener("mouseenter", enter);
     this.addEventListener("mouseleave", leave);
+    this.addEventListener("pointerdown", (event) => {
+      if (this.collapsed && event.button === 0) hostBridge.beginDrag();
+    });
   }
 
   animateQuotaFill() {
@@ -269,13 +299,11 @@ class CodexUsageWidget extends HTMLElement {
   }
 
   syncNativeSize(animated) {
-    if (!window.webkit?.messageHandlers?.panel) return;
     const widget = this.shadowRoot.querySelector(".widget");
     if (!this.collapsed && widget && window.innerWidth >= 350) {
       this.expandedHeight = Math.ceil(widget.getBoundingClientRect().height);
     }
-    window.webkit.messageHandlers.panel.postMessage({
-      action: "resize",
+    hostBridge.resize({
       width: this.collapsed ? 66 : 360,
       height: this.collapsed ? 66 : this.expandedHeight,
       animated,

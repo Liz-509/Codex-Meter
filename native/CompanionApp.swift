@@ -152,10 +152,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let configuration = WKWebViewConfiguration()
         configuration.userContentController.add(bridge, name: "panel")
         let bridgeScript = """
-        window.codexUsageBridge = {
+        window.codexMeterBridge = {
           getUsage() {
             window.webkit.messageHandlers.panel.postMessage({ action: 'getUsage' });
             return null;
+          },
+          resize(payload) {
+            window.webkit.messageHandlers.panel.postMessage({ action: 'resize', ...payload });
+          },
+          quit() {
+            window.webkit.messageHandlers.panel.postMessage({ action: 'quit' });
           }
         };
         """

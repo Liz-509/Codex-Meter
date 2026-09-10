@@ -144,7 +144,7 @@ final class CodexUsageService {
                     "clientInfo": [
                         "name": "codex_usage_widget",
                         "title": "Codex Meter",
-                        "version": "1.2.0"
+                        "version": "1.1.0"
                     ]
                 ]
             ], to: input.fileHandleForWriting)
@@ -157,7 +157,7 @@ final class CodexUsageService {
                 throw ServiceError.server(error["message"] as? String ?? "Codex 初始化失败")
             }
 
-            try send(["method": "initialized"], to: input.fileHandleForWriting)
+            try send(["method": "initialized", "params": [:]], to: input.fileHandleForWriting)
             try send(["method": "account/rateLimits/read", "id": 1], to: input.fileHandleForWriting)
             try send(["method": "account/usage/read", "id": 2], to: input.fileHandleForWriting)
 
