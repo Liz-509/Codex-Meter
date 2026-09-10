@@ -6,8 +6,8 @@ A lightweight native usage widget for Codex on macOS and Windows. It starts as a
 
 ## Download
 
-- [macOS Apple Silicon — Codex Meter v1.1.0](https://github.com/Liz-509/Codex-Meter/releases/download/v1.1.0/Codex-Meter-macOS-arm64-v1.1.0.zip)
-- [Windows 10/11 x64 — Codex Meter v1.1.0](https://github.com/Liz-509/Codex-Meter/releases/download/v1.1.0/Codex-Meter-Windows-x64-v1.1.0.zip)
+- [macOS Apple Silicon — Codex Meter v1.1.1](https://github.com/Liz-509/Codex-Meter/releases/download/v1.1.1/Codex-Meter-macOS-arm64-v1.1.1.zip)
+- [Windows 10/11 x64 — Codex Meter v1.1.1](https://github.com/Liz-509/Codex-Meter/releases/download/v1.1.1/Codex-Meter-Windows-x64-v1.1.1.zip)
 
 Unzip the archive. On macOS, move `Codex Meter.app` to your Applications folder and open it. On Windows, run `Codex Meter.exe` directly; installation and administrator access are not required. Intel Mac users can build from source.
 
@@ -68,7 +68,7 @@ Install the .NET 8 SDK, clone the repository, and run the following command in P
 .\scripts\build-windows.ps1
 ```
 
-The self-contained x64 app is written to `build\windows\win-x64`, and the portable archive is written to `outputs\Codex-Meter-Windows-x64-v1.1.0.zip`. Extract the archive and run `Codex Meter.exe`; installation and administrator access are not required.
+The self-contained x64 app is written to `build\windows\win-x64`, and the portable archive is written to `outputs\Codex-Meter-Windows-x64-v1.1.1.zip`. Extract the archive and run `Codex Meter.exe`; installation and administrator access are not required.
 
 The Windows app stays on top on the current virtual desktop and includes a system tray menu. Windows does not expose a stable public equivalent of macOS “all Spaces,” and exclusive full-screen games may cover the widget.
 
