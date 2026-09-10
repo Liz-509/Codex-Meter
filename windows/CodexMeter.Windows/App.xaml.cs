@@ -1,3 +1,4 @@
+using System.IO;
 using System.Threading;
 using System.Windows;
 
@@ -15,6 +16,12 @@ public partial class App : System.Windows.Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        if (e.Args.Contains("--self-test", StringComparer.OrdinalIgnoreCase))
+        {
+            Shutdown(RunSelfTest());
+            return;
+        }
 
         _instanceMutex = new Mutex(initiallyOwned: true, MutexName, out var isFirstInstance);
         if (!isFirstInstance)
@@ -74,5 +81,17 @@ public partial class App : System.Windows.Application
         {
             // The first process is still starting. Exiting still prevents duplicates.
         }
+    }
+
+    private static int RunSelfTest()
+    {
+        var resourceDirectory = Path.Combine(AppContext.BaseDirectory, "Resources");
+        var requiredFiles = new[]
+        {
+            Path.Combine(resourceDirectory, "companion.html"),
+            Path.Combine(resourceDirectory, "usage-widget.js")
+        };
+
+        return requiredFiles.All(File.Exists) ? 0 : 1;
     }
 }

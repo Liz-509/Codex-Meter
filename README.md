@@ -6,9 +6,10 @@ A lightweight native usage widget for Codex on macOS and Windows. It starts as a
 
 ## Download
 
-[Download Codex Meter v1.0.0 for Apple Silicon](https://github.com/Liz-509/Codex-Meter/releases/download/v1.0.0/Codex-Meter-macOS-arm64-v1.0.0.zip)
+- [macOS Apple Silicon — Codex Meter v1.1.0](https://github.com/Liz-509/Codex-Meter/releases/download/v1.1.0/Codex-Meter-macOS-arm64-v1.1.0.zip)
+- [Windows 10/11 x64 — Codex Meter v1.1.0](https://github.com/Liz-509/Codex-Meter/releases/download/v1.1.0/Codex-Meter-Windows-x64-v1.1.0.zip)
 
-Unzip the archive, move `Codex Meter.app` to your Applications folder, and open it. The current prebuilt download supports Apple Silicon Macs (`arm64`). Intel Mac and Windows users can build from source; the Windows x64 package is produced automatically for the v1.1.0 release workflow.
+Unzip the archive. On macOS, move `Codex Meter.app` to your Applications folder and open it. On Windows, run `Codex Meter.exe` directly; installation and administrator access are not required. Intel Mac users can build from source.
 
 Because the app is not notarized, macOS may ask you to confirm the first launch. Control-click the app, choose **Open**, then confirm **Open**.
 

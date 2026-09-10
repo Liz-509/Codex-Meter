@@ -47,6 +47,19 @@ jobs:
       - name: Build portable package
         shell: pwsh
         run: ./scripts/build-windows.ps1 -Version 1.1.0
+      - name: Smoke test packaged app
+        shell: pwsh
+        run: |
+          $smokeDirectory = Join-Path $env:RUNNER_TEMP "codex-meter-smoke"
+          Expand-Archive outputs/Codex-Meter-Windows-x64-v1.1.0.zip $smokeDirectory
+          $process = Start-Process `
+            -FilePath (Join-Path $smokeDirectory "Codex Meter.exe") `
+            -ArgumentList "--self-test" `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Packaged app smoke test failed with exit code $($process.ExitCode)"
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: Codex-Meter-Windows-x64-v1.1.0
