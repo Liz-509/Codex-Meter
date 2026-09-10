@@ -4,3 +4,6 @@ outputs/
 work/
 *.zip
 .swiftpm/
+**/bin/
+**/obj/
+.vs/
