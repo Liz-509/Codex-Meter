@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -75,7 +76,7 @@ public partial class MainWindow : Window
         }
         catch (Exception error)
         {
-            MessageBox.Show(
+            System.Windows.MessageBox.Show(
                 $"Codex Meter 无法启动 WebView2：\n\n{error.Message}",
                 "Codex Meter",
                 MessageBoxButton.OK,
@@ -284,8 +285,8 @@ public partial class MainWindow : Window
         var screen = Forms.Screen.FromHandle(handle);
         var source = HwndSource.FromHwnd(handle);
         var transform = source?.CompositionTarget?.TransformFromDevice ?? Matrix.Identity;
-        var topLeft = transform.Transform(new Point(screen.WorkingArea.Left, screen.WorkingArea.Top));
-        var bottomRight = transform.Transform(new Point(screen.WorkingArea.Right, screen.WorkingArea.Bottom));
+        var topLeft = transform.Transform(new System.Windows.Point(screen.WorkingArea.Left, screen.WorkingArea.Top));
+        var bottomRight = transform.Transform(new System.Windows.Point(screen.WorkingArea.Right, screen.WorkingArea.Bottom));
         return new Rect(topLeft, bottomRight);
     }
 
@@ -311,7 +312,7 @@ public partial class MainWindow : Window
 
     private static void ShowWebViewRuntimeMessage()
     {
-        var result = MessageBox.Show(
+        var result = System.Windows.MessageBox.Show(
             "Codex Meter 需要 Microsoft Edge WebView2 Runtime。是否打开官方下载页面？",
             "Codex Meter",
             MessageBoxButton.YesNo,
