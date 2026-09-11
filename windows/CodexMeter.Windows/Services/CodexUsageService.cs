@@ -125,7 +125,7 @@ internal sealed class CodexUsageService
                     {
                         ["name"] = "codex_usage_widget",
                         ["title"] = "Codex Meter",
-                        ["version"] = "1.3.0"
+                        ["version"] = "1.3.1"
                     }
                 }
             });

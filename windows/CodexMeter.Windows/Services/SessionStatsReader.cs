@@ -111,7 +111,14 @@ internal static partial class SessionStatsReader
         long previousTotal = 0;
         var usageRecordSinceTokenCount = false;
 
-        foreach (var line in File.ReadLines(file))
+        using var stream = new FileStream(
+            file,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream);
+
+        while (reader.ReadLine() is { } line)
         {
             JsonDocument document;
             try

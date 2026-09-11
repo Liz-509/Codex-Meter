@@ -130,6 +130,44 @@ public sealed class SessionStatsReaderTests
         }
     }
 
+    [TestMethod]
+    public void ReadToday_ReadsSessionWhileCodexIsStillWritingIt()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"codex-meter-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var file = Path.Combine(directory, "active-session.jsonl");
+            File.WriteAllLines(file,
+            [
+                SessionMeta("2026-09-11T00:00:00.000Z", "thread-a", "window-a"),
+                TaskStarted("2026-09-11T01:00:00.000Z", "turn-a"),
+                UsageRecord("2026-09-11T01:01:00.000Z", "turn-a", 42, 42)
+            ]);
+            File.SetLastWriteTimeUtc(file, new DateTime(2026, 9, 11, 2, 0, 0, DateTimeKind.Utc));
+
+            using var writer = new FileStream(
+                file,
+                FileMode.Open,
+                FileAccess.Write,
+                FileShare.ReadWrite | FileShare.Delete);
+
+            var stats = SessionStatsReader.ReadToday(
+                directory,
+                DateTimeOffset.Parse("2026-09-11T03:00:00Z"),
+                TimeZoneInfo.Utc);
+
+            Assert.AreEqual(1, stats.Questions);
+            Assert.AreEqual(42L, stats.Tokens);
+            Assert.AreEqual(1, stats.Conversations.Count);
+            Assert.AreEqual(42L, stats.Conversations[0].Tokens.GetValueOrDefault());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static string Event(string timestamp, string eventType, long? tokens)
     {
         var tokenInfo = tokens is null
