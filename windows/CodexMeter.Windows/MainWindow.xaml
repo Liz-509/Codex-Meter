@@ -13,7 +13,7 @@
         Topmost="True"
         ShowInTaskbar="False"
         WindowStartupLocation="Manual">
-  <Grid Background="Transparent">
-    <wv2:WebView2CompositionControl x:Name="Browser" />
+  <Grid Background="#01000000">
+    <wv2:WebView2 x:Name="Browser" />
   </Grid>
 </Window>

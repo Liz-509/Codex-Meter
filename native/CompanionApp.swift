@@ -245,7 +245,12 @@ final class PanelBridge: NSObject, WKScriptMessageHandler {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate {
+    private struct LifecycleObserver {
+        let center: NotificationCenter
+        let token: NSObjectProtocol
+    }
+
     private var panel: NSPanel?
     private weak var webView: WKWebView?
     private let usageService = CodexUsageService()
@@ -256,6 +261,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var retryAttempt = 0
     private var retryWorkItem: DispatchWorkItem?
     private let bridge = PanelBridge()
+    private var lifecycleObservers: [LifecycleObserver] = []
+    private var sessionActive = true
+    private var screensActive = true
+    private var powerActive = true
+    private var appVisible = true
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -268,6 +278,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             NSApp.applicationIconImage = icon
         }
         createPanel()
+        observeLifecycle()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.refreshUsage()
         }
@@ -276,6 +287,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         refreshTimer?.invalidate()
         retryWorkItem?.cancel()
+        lifecycleObservers.forEach { $0.center.removeObserver($0.token) }
+        lifecycleObservers.removeAll()
+        usageService.shutdown()
     }
 
     private func createPanel() {
@@ -309,6 +323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let configuration = WKWebViewConfiguration()
         configuration.userContentController.add(bridge, name: "panel")
         let bridgeScript = """
+        window.codexMeterHostActive = true;
         window.codexMeterBridge = {
           getUsage() {
             window.webkit.messageHandlers.panel.postMessage({ action: 'getUsage' });
@@ -333,6 +348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let webView = HoverWebView(frame: panel.contentView?.bounds ?? .zero, configuration: configuration)
         webView.autoresizingMask = [.width, .height]
         webView.setValue(false, forKey: "drawsBackground")
+        webView.navigationDelegate = self
         webView.onHoverChanged = { [weak webView, weak panel] entered, pointer in
             if entered {
                 panel?.makeKeyAndOrderFront(nil)
@@ -389,6 +405,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         self.webView = webView
         panel.orderFrontRegardless()
         self.panel = panel
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        publishHostActive()
+    }
+
+    private func observeLifecycle() {
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        observe(workspaceCenter, NSWorkspace.sessionDidResignActiveNotification) { $0.sessionActive = false }
+        observe(workspaceCenter, NSWorkspace.sessionDidBecomeActiveNotification) { $0.sessionActive = true }
+        observe(workspaceCenter, NSWorkspace.screensDidSleepNotification) { $0.screensActive = false }
+        observe(workspaceCenter, NSWorkspace.screensDidWakeNotification) { $0.screensActive = true }
+        observe(workspaceCenter, NSWorkspace.willSleepNotification) { $0.powerActive = false }
+        observe(workspaceCenter, NSWorkspace.didWakeNotification) { $0.powerActive = true }
+
+        let applicationCenter = NotificationCenter.default
+        observe(applicationCenter, NSApplication.didHideNotification) { $0.appVisible = false }
+        observe(applicationCenter, NSApplication.didUnhideNotification) { $0.appVisible = true }
+    }
+
+    private func observe(
+        _ center: NotificationCenter,
+        _ name: Notification.Name,
+        update: @escaping (AppDelegate) -> Void
+    ) {
+        let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            update(self)
+            self.publishHostActive()
+        }
+        lifecycleObservers.append(LifecycleObserver(center: center, token: token))
+    }
+
+    private func publishHostActive() {
+        let active = sessionActive && screensActive && powerActive && appVisible && panel?.isVisible == true
+        let value = active ? "true" : "false"
+        webView?.evaluateJavaScript(
+            "window.codexMeterHostActive=\(value);window.codexUsageSetHostActive?.(\(value));"
+        )
     }
 
     private func refreshUsage() {

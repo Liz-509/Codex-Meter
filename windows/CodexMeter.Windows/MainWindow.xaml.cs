@@ -19,7 +19,11 @@ public partial class MainWindow : Window
 {
     private const uint WmNcLeftButtonDown = 0x00A1;
     private const int WmExitSizeMove = 0x0232;
+    private const int WmPowerBroadcast = 0x0218;
+    private const int PbtPowerSettingChange = 0x8013;
+    private const int DeviceNotifyWindowHandle = 0;
     private const int HtCaption = 0x0002;
+    private static readonly Guid SessionDisplayStatus = new("2B84C20E-AD23-4DDF-93DB-05FFBD7EFCA5");
     private static readonly TimeSpan[] RetryDelays =
     [
         TimeSpan.FromSeconds(2),
@@ -41,6 +45,10 @@ public partial class MainWindow : Window
     private System.Windows.Point? _compactOrigin;
     private HwndSource? _windowSource;
     private bool _isNativeDragging;
+    private bool _sessionActive = true;
+    private bool _powerActive = true;
+    private bool _displayActive = true;
+    private nint _displayPowerNotification;
 
     public MainWindow()
     {
@@ -54,7 +62,10 @@ public partial class MainWindow : Window
         Loaded += OnLoaded;
         Closed += OnClosed;
         SourceInitialized += OnSourceInitialized;
+        IsVisibleChanged += OnIsVisibleChanged;
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+        SystemEvents.SessionSwitch += OnSessionSwitch;
+        SystemEvents.PowerModeChanged += OnPowerModeChanged;
 
         _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };
         _refreshTimer.Tick += async (_, _) => await RefreshUsageAsync();
@@ -112,6 +123,7 @@ public partial class MainWindow : Window
 
         await Browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
             """
+            window.codexMeterHostActive = true;
             window.codexMeterBridge = {
               getUsage() {
                 window.chrome.webview.postMessage({ action: 'getUsage' });
@@ -145,6 +157,7 @@ public partial class MainWindow : Window
         Browser.CoreWebView2.NavigationCompleted += async (_, _) =>
         {
             _webReady = true;
+            await PublishHostActiveAsync();
             await RefreshUsageAsync();
         };
         Browser.CoreWebView2.Navigate("https://app.codex-meter.local/companion.html");
@@ -413,6 +426,11 @@ public partial class MainWindow : Window
         var handle = new WindowInteropHelper(this).Handle;
         _windowSource = HwndSource.FromHwnd(handle);
         _windowSource?.AddHook(WindowMessageHook);
+        var sessionDisplayStatus = SessionDisplayStatus;
+        _displayPowerNotification = RegisterPowerSettingNotification(
+            handle,
+            ref sessionDisplayStatus,
+            DeviceNotifyWindowHandle);
     }
 
     private nint WindowMessageHook(
@@ -426,7 +444,56 @@ public partial class MainWindow : Window
         {
             Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(CompleteNativeDrag));
         }
+        else if (message == WmPowerBroadcast && wParam.ToInt32() == PbtPowerSettingChange)
+        {
+            var setting = Marshal.PtrToStructure<PowerBroadcastSetting>(lParam);
+            if (setting.PowerSetting == SessionDisplayStatus)
+            {
+                _displayActive = setting.Data != 0;
+                _ = PublishHostActiveAsync();
+            }
+        }
         return 0;
+    }
+
+    private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
+    {
+        _sessionActive = e.Reason switch
+        {
+            SessionSwitchReason.SessionLock or
+            SessionSwitchReason.ConsoleDisconnect or
+            SessionSwitchReason.RemoteDisconnect => false,
+            SessionSwitchReason.SessionUnlock or
+            SessionSwitchReason.ConsoleConnect or
+            SessionSwitchReason.RemoteConnect => true,
+            _ => _sessionActive
+        };
+        _ = Dispatcher.InvokeAsync(PublishHostActiveAsync);
+    }
+
+    private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
+    {
+        if (e.Mode == PowerModes.Suspend) _powerActive = false;
+        if (e.Mode == PowerModes.Resume) _powerActive = true;
+        _ = Dispatcher.InvokeAsync(PublishHostActiveAsync);
+    }
+
+    private void OnIsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e) =>
+        _ = PublishHostActiveAsync();
+
+    private async Task PublishHostActiveAsync()
+    {
+        if (!_webReady || Browser.CoreWebView2 is null) return;
+        var active = _sessionActive && _powerActive && _displayActive && IsVisible && !_isExiting;
+        try
+        {
+            await Browser.CoreWebView2.ExecuteScriptAsync(
+                $"window.codexUsageSetHostActive?.({active.ToString().ToLowerInvariant()});");
+        }
+        catch
+        {
+            // The web view may be navigating or shutting down.
+        }
     }
 
     private async void CompleteNativeDrag()
@@ -543,6 +610,14 @@ public partial class MainWindow : Window
         _lifetime.Cancel();
         _refreshTimer.Stop();
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+        SystemEvents.SessionSwitch -= OnSessionSwitch;
+        SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+        IsVisibleChanged -= OnIsVisibleChanged;
+        if (_displayPowerNotification != 0)
+        {
+            UnregisterPowerSettingNotification(_displayPowerNotification);
+            _displayPowerNotification = 0;
+        }
         _windowSource?.RemoveHook(WindowMessageHook);
         if (_trayIcon is not null)
         {
@@ -550,6 +625,8 @@ public partial class MainWindow : Window
             _trayIcon.Dispose();
         }
         _trayIconImage?.Dispose();
+        Browser.Dispose();
+        _usageService.Dispose();
         _lifetime.Dispose();
         if (!_isExiting) ExitApplication();
     }
@@ -564,10 +641,28 @@ public partial class MainWindow : Window
     [DllImport("user32.dll")]
     private static extern nint SendMessage(IntPtr hWnd, uint message, nint wParam, nint lParam);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern nint RegisterPowerSettingNotification(
+        nint recipient,
+        ref Guid powerSettingGuid,
+        int flags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UnregisterPowerSettingNotification(nint handle);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct NativePoint
     {
         public int X;
         public int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PowerBroadcastSetting
+    {
+        public Guid PowerSetting;
+        public int DataLength;
+        public int Data;
     }
 }

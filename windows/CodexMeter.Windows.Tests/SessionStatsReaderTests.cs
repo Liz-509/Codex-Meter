@@ -168,6 +168,123 @@ public sealed class SessionStatsReaderTests
         }
     }
 
+    [TestMethod]
+    public void ReadToday_ExcludesInternalGuardianThreadButKeepsItsTokenUsage()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"codex-meter-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var file = Path.Combine(directory, "guardian-review.jsonl");
+            File.WriteAllLines(file,
+            [
+                InternalSessionMeta("2026-09-11T00:00:00.000Z", "guardian-thread", "guardian-window"),
+                TaskStarted("2026-09-11T00:01:00.000Z", "guardian-turn"),
+                UserText(
+                    "2026-09-11T00:01:01.000Z",
+                    "guardian-turn",
+                    "The following is the Codex agent history whose request action you are assessing."),
+                UsageRecord("2026-09-11T00:02:00.000Z", "guardian-turn", 80, 80)
+            ]);
+            File.SetLastWriteTimeUtc(file, new DateTime(2026, 9, 11, 1, 0, 0, DateTimeKind.Utc));
+
+            var stats = SessionStatsReader.ReadToday(
+                directory,
+                DateTimeOffset.Parse("2026-09-11T03:00:00Z"),
+                TimeZoneInfo.Utc);
+
+            Assert.AreEqual(0, stats.Questions);
+            Assert.AreEqual(0, stats.Conversations.Count);
+            Assert.AreEqual(80L, stats.Tokens);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    public void Cache_ReusesUnchangedFilesAndRefreshesChangedOrDeletedFiles()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"codex-meter-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var file = Path.Combine(directory, "session.jsonl");
+            File.WriteAllLines(file,
+            [
+                TaskStarted("2026-09-11T01:00:00.000Z", "turn-a"),
+                UsageRecord("2026-09-11T01:01:00.000Z", "turn-a", 10, 10)
+            ]);
+            File.SetLastWriteTimeUtc(file, new DateTime(2026, 9, 11, 2, 0, 0, DateTimeKind.Utc));
+
+            var parseCount = 0;
+            var cache = new SessionStatsCache((path, now, timeZone) =>
+            {
+                parseCount++;
+                return SessionStatsReader.ReadFileContribution(path, now, timeZone);
+            });
+            var now = DateTimeOffset.Parse("2026-09-11T03:00:00Z");
+
+            Assert.AreEqual(10L, cache.ReadToday(directory, now, TimeZoneInfo.Utc).Tokens);
+            Assert.AreEqual(10L, cache.ReadToday(directory, now, TimeZoneInfo.Utc).Tokens);
+            Assert.AreEqual(1, parseCount);
+
+            File.AppendAllLines(file, [UsageRecord("2026-09-11T02:00:00.000Z", "turn-a", 15, 15)]);
+            File.SetLastWriteTimeUtc(file, new DateTime(2026, 9, 11, 2, 5, 0, DateTimeKind.Utc));
+            Assert.AreEqual(25L, cache.ReadToday(directory, now, TimeZoneInfo.Utc).Tokens);
+            Assert.AreEqual(2, parseCount);
+
+            File.Delete(file);
+            var empty = cache.ReadToday(directory, now, TimeZoneInfo.Utc);
+            Assert.AreEqual(0L, empty.Tokens);
+            Assert.AreEqual(0, empty.Questions);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [TestMethod]
+    public void Cache_InvalidatesAcrossLocalDayAndTimeZoneChanges()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"codex-meter-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var file = Path.Combine(directory, "session.jsonl");
+            File.WriteAllLines(file,
+            [
+                TaskStarted("2026-09-10T20:00:00.000Z", "turn-a"),
+                UsageRecord("2026-09-10T20:01:00.000Z", "turn-a", 10, 10)
+            ]);
+            File.SetLastWriteTimeUtc(file, new DateTime(2026, 9, 11, 1, 0, 0, DateTimeKind.Utc));
+
+            var parseCount = 0;
+            var cache = new SessionStatsCache((path, now, timeZone) =>
+            {
+                parseCount++;
+                return SessionStatsReader.ReadFileContribution(path, now, timeZone);
+            });
+            var now = DateTimeOffset.Parse("2026-09-11T02:00:00Z");
+            var utc = cache.ReadToday(directory, now, TimeZoneInfo.Utc);
+            var utcPlusEight = TimeZoneInfo.CreateCustomTimeZone("UTC+8-cache", TimeSpan.FromHours(8), "UTC+8", "UTC+8");
+            var local = cache.ReadToday(directory, now, utcPlusEight);
+
+            Assert.AreEqual(0, utc.Questions);
+            Assert.AreEqual(1, local.Questions);
+            Assert.AreEqual(2, parseCount);
+
+            cache.ReadToday(directory, now.AddDays(1), utcPlusEight);
+            Assert.AreEqual(3, parseCount);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static string Event(string timestamp, string eventType, long? tokens)
     {
         var tokenInfo = tokens is null
@@ -184,6 +301,11 @@ public sealed class SessionStatsReaderTests
     private static string SessionMeta(string timestamp, string threadId, string contextWindowId)
     {
         return $"{{\"timestamp\":\"{timestamp}\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{threadId}\",\"context_window\":{{\"window_id\":\"{contextWindowId}\"}}}}}}";
+    }
+
+    private static string InternalSessionMeta(string timestamp, string threadId, string contextWindowId)
+    {
+        return $"{{\"timestamp\":\"{timestamp}\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{threadId}\",\"thread_source\":\"guardian_review\",\"source\":{{\"subagent\":{{\"other\":\"guardian\"}}}},\"context_window\":{{\"window_id\":\"{contextWindowId}\"}}}}}}";
     }
 
     private static string UserText(string timestamp, string turnId, string text)

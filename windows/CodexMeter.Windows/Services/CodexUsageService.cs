@@ -2,16 +2,28 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace CodexMeter.Windows.Services;
 
-internal sealed class CodexUsageService
+internal sealed class CodexUsageService : IDisposable
 {
-    private sealed record AppServerRequest(int Id, string Method, JsonObject? Params = null);
+    private sealed record AppServerRequest(string Method, JsonObject? Params = null);
 
     private readonly CodexExecutableLocator _locator;
+    private readonly SessionStatsCache _sessionStats = new();
+    private readonly SemaphoreSlim _serverGate = new(1, 1);
+    private readonly ConcurrentDictionary<int, TaskCompletionSource<JsonObject>> _responses = new();
+    private readonly StringBuilder _serverErrors = new();
+    private CodexCommand? _cachedCommand;
+    private Process? _serverProcess;
+    private CancellationTokenSource? _serverCancellation;
+    private Task? _serverOutputPump;
+    private Task? _serverErrorPump;
+    private int _nextRequestId;
+    private bool _disposed;
 
     public CodexUsageService(CodexExecutableLocator? locator = null)
     {
@@ -31,7 +43,7 @@ internal sealed class CodexUsageService
         }
 
         var stats = await Task.Run(
-            () => SessionStatsReader.ReadToday(
+            () => _sessionStats.ReadToday(
                 Path.Combine(codexHome, "sessions"),
                 DateTimeOffset.Now,
                 TimeZoneInfo.Local),
@@ -63,7 +75,6 @@ internal sealed class CodexUsageService
         {
             var responses = await SendAccountRequestsAsync(
                 [new AppServerRequest(
-                    1,
                     "account/rateLimitResetCredit/consume",
                     new JsonObject { ["idempotencyKey"] = idempotencyKey })],
                 cancellationToken);
@@ -83,10 +94,9 @@ internal sealed class CodexUsageService
     {
         var responses = await SendAccountRequestsAsync(
             [
-                new AppServerRequest(1, "account/rateLimits/read"),
-                new AppServerRequest(2, "account/usage/read"),
+                new AppServerRequest("account/rateLimits/read"),
+                new AppServerRequest("account/usage/read"),
                 new AppServerRequest(
-                    3,
                     "thread/list",
                     new JsonObject { ["limit"] = 100, ["sortKey"] = "updated_at" })
             ],
@@ -101,73 +111,217 @@ internal sealed class CodexUsageService
         IReadOnlyList<AppServerRequest> requests,
         CancellationToken cancellationToken)
     {
-        var command = _locator.FindFromEnvironment()
-            ?? throw new InvalidOperationException("未找到 Codex。请安装 Windows 版 Codex，或设置 CODEX_BINARY / CODEX_CLI_PATH。");
-
-        using var process = new Process { StartInfo = command.CreateStartInfo(), EnableRaisingEvents = true };
-        if (!process.Start()) throw new InvalidOperationException("Codex App Server 启动失败。");
-
-        using var pumpCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var responses = new ConcurrentDictionary<int, TaskCompletionSource<JsonObject>>();
-        var outputPump = PumpOutputAsync(process.StandardOutput, responses, pumpCancellation.Token);
-        var errorOutput = process.StandardError.ReadToEndAsync(cancellationToken);
-
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        await _serverGate.WaitAsync(cancellationToken);
         try
         {
-            var initialize = Register(responses, 0);
-            await SendAsync(process.StandardInput, new JsonObject
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            for (var attempt = 0; ; attempt++)
             {
-                ["method"] = "initialize",
-                ["id"] = 0,
-                ["params"] = new JsonObject
+                try
                 {
-                    ["clientInfo"] = new JsonObject
-                    {
-                        ["name"] = "codex_usage_widget",
-                        ["title"] = "Codex Meter",
-                        ["version"] = "1.3.2"
-                    }
+                    await EnsureServerAsync(cancellationToken);
+                    return await SendBatchAsync(requests, cancellationToken);
                 }
-            });
-            ThrowIfError(await initialize.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken));
+                catch (OperationCanceledException)
+                {
+                    await ResetServerAsync();
+                    throw;
+                }
+                catch (Exception) when (attempt == 0)
+                {
+                    ObjectDisposedException.ThrowIf(_disposed, this);
+                    await ResetServerAsync();
+                    _cachedCommand = null;
+                }
+            }
+        }
+        finally
+        {
+            _serverGate.Release();
+        }
+    }
 
-            await SendAsync(process.StandardInput, new JsonObject
+    private async Task EnsureServerAsync(CancellationToken cancellationToken)
+    {
+        if (_serverProcess is { HasExited: false }) return;
+        await ResetServerAsync();
+
+        _cachedCommand ??= _locator.FindFromEnvironment()
+            ?? throw new InvalidOperationException("未找到 Codex。请安装 Windows 版 Codex，或设置 CODEX_BINARY / CODEX_CLI_PATH。");
+        var process = new Process { StartInfo = _cachedCommand.CreateStartInfo(), EnableRaisingEvents = true };
+        if (!process.Start())
+        {
+            process.Dispose();
+            throw new InvalidOperationException("Codex App Server 启动失败。");
+        }
+
+        _serverErrors.Clear();
+        _serverProcess = process;
+        process.Exited += OnServerExited;
+        _serverCancellation = new CancellationTokenSource();
+        _serverOutputPump = PumpOutputAsync(process.StandardOutput, _responses, _serverCancellation.Token);
+        _serverErrorPump = PumpErrorsAsync(process.StandardError, _serverCancellation.Token);
+
+        var initializeId = NextRequestId();
+        var initialize = Register(_responses, initializeId);
+        await SendAsync(process.StandardInput, new JsonObject
+        {
+            ["method"] = "initialize",
+            ["id"] = initializeId,
+            ["params"] = new JsonObject
             {
-                ["method"] = "initialized",
-                ["params"] = new JsonObject()
-            });
+                ["clientInfo"] = new JsonObject
+                {
+                    ["name"] = "codex_usage_widget",
+                    ["title"] = "Codex Meter",
+                    ["version"] = "1.4.0"
+                }
+            }
+        });
+        try
+        {
+            ThrowIfError(await initialize.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken));
+        }
+        finally
+        {
+            _responses.TryRemove(initializeId, out _);
+        }
 
-            var pendingResponses = new List<Task<JsonObject>>(requests.Count);
+        await SendAsync(process.StandardInput, new JsonObject
+        {
+            ["method"] = "initialized",
+            ["params"] = new JsonObject()
+        });
+    }
+
+    private async Task<JsonObject[]> SendBatchAsync(
+        IReadOnlyList<AppServerRequest> requests,
+        CancellationToken cancellationToken)
+    {
+        var process = _serverProcess
+            ?? throw new InvalidOperationException("Codex App Server 尚未启动。");
+        var pending = new List<(int Id, Task<JsonObject> Task)>(requests.Count);
+        try
+        {
             foreach (var request in requests)
             {
-                var response = Register(responses, request.Id);
-                pendingResponses.Add(response.Task.WaitAsync(TimeSpan.FromSeconds(20), cancellationToken));
+                var id = NextRequestId();
+                var response = Register(_responses, id);
+                pending.Add((id, response.Task.WaitAsync(TimeSpan.FromSeconds(20), cancellationToken)));
                 var message = new JsonObject
                 {
                     ["method"] = request.Method,
-                    ["id"] = request.Id
+                    ["id"] = id
                 };
                 if (request.Params is not null) message["params"] = request.Params.DeepClone();
                 await SendAsync(process.StandardInput, message);
             }
 
-            return await Task.WhenAll(pendingResponses);
+            return await Task.WhenAll(pending.Select(item => item.Task));
         }
-        catch (TimeoutException)
+        catch (TimeoutException error)
         {
-            var stderr = errorOutput.IsCompletedSuccessfully ? errorOutput.Result : string.Empty;
-            throw new TimeoutException(string.IsNullOrWhiteSpace(stderr) ? "Codex 数据请求超时。" : stderr.Trim());
+            var stderr = ReadServerErrors();
+            throw new TimeoutException(string.IsNullOrWhiteSpace(stderr) ? "Codex 数据请求超时。" : stderr, error);
         }
         finally
         {
-            pumpCancellation.Cancel();
+            foreach (var item in pending) _responses.TryRemove(item.Id, out _);
+        }
+    }
+
+    private int NextRequestId() => Interlocked.Increment(ref _nextRequestId);
+
+    private async Task PumpErrorsAsync(StreamReader errors, CancellationToken cancellationToken)
+    {
+        var buffer = new char[1024];
+        while (true)
+        {
+            var count = await errors.ReadAsync(buffer.AsMemory(), cancellationToken);
+            if (count == 0) break;
+            lock (_serverErrors)
+            {
+                _serverErrors.Append(buffer, 0, count);
+                if (_serverErrors.Length > 8192) _serverErrors.Remove(0, _serverErrors.Length - 8192);
+            }
+        }
+    }
+
+    private string ReadServerErrors()
+    {
+        lock (_serverErrors) return _serverErrors.ToString().Trim();
+    }
+
+    private void OnServerExited(object? sender, EventArgs e) =>
+        FailPending(new InvalidOperationException("Codex App Server 已退出。"));
+
+    private void FailPending(Exception error)
+    {
+        foreach (var response in _responses.ToArray())
+        {
+            if (_responses.TryRemove(response.Key, out var waiter)) waiter.TrySetException(error);
+        }
+    }
+
+    private async Task ResetServerAsync()
+    {
+        var process = _serverProcess;
+        var cancellation = _serverCancellation;
+        var outputPump = _serverOutputPump;
+        var errorPump = _serverErrorPump;
+        _serverProcess = null;
+        _serverCancellation = null;
+        _serverOutputPump = null;
+        _serverErrorPump = null;
+
+        cancellation?.Cancel();
+        if (process is not null)
+        {
             try { process.StandardInput.Close(); } catch { }
             if (!process.HasExited)
             {
                 try { process.Kill(entireProcessTree: true); } catch { }
             }
+        }
+        if (outputPump is not null)
+        {
             try { await outputPump; } catch (OperationCanceledException) { } catch (IOException) { }
         }
+        if (errorPump is not null)
+        {
+            try { await errorPump; } catch (OperationCanceledException) { } catch (IOException) { }
+        }
+        process?.Dispose();
+        cancellation?.Dispose();
+        FailPending(new InvalidOperationException("Codex App Server 已断开。"));
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+
+        // Window shutdown must never wait behind a 20-second account request. Tear
+        // down the transport immediately; the active request observes cancellation
+        // or the broken pipe and releases the gate on its own.
+        var process = Interlocked.Exchange(ref _serverProcess, null);
+        var cancellation = Interlocked.Exchange(ref _serverCancellation, null);
+        _serverOutputPump = null;
+        _serverErrorPump = null;
+        cancellation?.Cancel();
+        try { process?.StandardInput.Close(); } catch { }
+        if (process is not null)
+        {
+            try
+            {
+                if (!process.HasExited) process.Kill(entireProcessTree: true);
+            }
+            catch { }
+            try { process.Dispose(); } catch { }
+        }
+        cancellation?.Dispose();
+        FailPending(new ObjectDisposedException(nameof(CodexUsageService)));
     }
 
     private static JsonObject CreateLocalPayload(SessionStats stats) => UsagePayloadBuilder.CreateLocal(stats);

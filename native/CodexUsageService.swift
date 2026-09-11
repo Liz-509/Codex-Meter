@@ -4,9 +4,13 @@ private final class JSONLineResponseCollector: @unchecked Sendable {
     private let condition = NSCondition()
     private var buffer = Data()
     private var responses: [Int: [String: Any]] = [:]
+    private var closed = false
 
     func append(_ data: Data) {
-        guard !data.isEmpty else { return }
+        guard !data.isEmpty else {
+            close()
+            return
+        }
         condition.lock()
         buffer.append(data)
 
@@ -29,11 +33,23 @@ private final class JSONLineResponseCollector: @unchecked Sendable {
         defer { condition.unlock() }
 
         while !ids.allSatisfy({ responses[$0] != nil }) {
+            if closed { return nil }
             if !condition.wait(until: deadline) {
                 return nil
             }
         }
-        return responses
+        var result: [Int: [String: Any]] = [:]
+        for id in ids {
+            result[id] = responses.removeValue(forKey: id)
+        }
+        return result
+    }
+
+    func close() {
+        condition.lock()
+        closed = true
+        condition.broadcast()
+        condition.unlock()
     }
 }
 
@@ -60,6 +76,31 @@ final class CodexUsageService {
         var tokens: Int { dailyTokens.last?.tokens ?? 0 }
     }
 
+    private struct SessionFileSignature: Equatable {
+        let size: Int
+        let modifiedAt: Date
+    }
+
+    private struct CachedSessionFile {
+        let signature: SessionFileSignature
+        let stats: LocalStats
+    }
+
+    private let workQueue = DispatchQueue(label: "com.local.codex-usage.service", qos: .userInitiated)
+    private var serverProcess: Process?
+    private var serverInput: Pipe?
+    private var serverOutput: Pipe?
+    private var serverErrors: Pipe?
+    private var responseCollector: JSONLineResponseCollector?
+    private let lifecycleLock = NSLock()
+    private let errorLock = NSLock()
+    private var errorBuffer = Data()
+    private var cachedExecutable: URL?
+    private var nextRequestID = 0
+    private var isShutdown = false
+    private var sessionFiles: [String: CachedSessionFile] = [:]
+    private var sessionWindowKey: String?
+
     private enum ServiceError: LocalizedError {
         case binaryMissing
         case timedOut
@@ -81,8 +122,8 @@ final class CodexUsageService {
     }
 
     func fetch(completion: @escaping ([String: Any]) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let localStats = self.localStats()
+        workQueue.async {
+            let localStats = self.cachedLocalStats()
             var payload = self.localPayload(from: localStats)
 
             var partialPayload = payload
@@ -132,7 +173,7 @@ final class CodexUsageService {
     }
 
     func consumeResetCredit(idempotencyKey: String, completion: @escaping ([String: Any]) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async {
+        workQueue.async {
             let payload: [String: Any]
             do {
                 let responses = try self.performRequests([
@@ -173,14 +214,73 @@ final class CodexUsageService {
         _ requests: [[String: Any]],
         waitingFor responseIDs: Set<Int>
     ) throws -> [Int: [String: Any]] {
-        guard let executable = codexExecutable else {
+        for attempt in 0..<2 {
+            do {
+                try ensureServer()
+                lifecycleLock.lock()
+                let input = serverInput?.fileHandleForWriting
+                let collector = responseCollector
+                lifecycleLock.unlock()
+                guard let input, let collector else {
+                    throw ServiceError.server("Codex App Server 尚未启动")
+                }
+
+                var physicalIDs: Set<Int> = []
+                var logicalToPhysical: [Int: Int] = [:]
+                for request in requests {
+                    guard let logicalID = (request["id"] as? NSNumber)?.intValue else { continue }
+                    let physicalID = nextID()
+                    var physicalRequest = request
+                    physicalRequest["id"] = physicalID
+                    logicalToPhysical[logicalID] = physicalID
+                    physicalIDs.insert(physicalID)
+                    try send(physicalRequest, to: input)
+                }
+
+                guard physicalIDs.count == responseIDs.count,
+                      let physicalResponses = collector.wait(for: physicalIDs, timeout: 20) else {
+                    if let message = serverErrorMessage(), !message.isEmpty {
+                        throw ServiceError.server(message)
+                    }
+                    throw ServiceError.timedOut
+                }
+                var logicalResponses: [Int: [String: Any]] = [:]
+                for logicalID in responseIDs {
+                    guard let physicalID = logicalToPhysical[logicalID],
+                          let response = physicalResponses[physicalID] else {
+                        throw ServiceError.responseMissing("请求")
+                    }
+                    logicalResponses[logicalID] = response
+                }
+                return logicalResponses
+            } catch {
+                resetServer()
+                cachedExecutable = nil
+                if attempt == 1 { throw error }
+            }
+        }
+        throw ServiceError.timedOut
+    }
+
+    private func ensureServer() throws {
+        lifecycleLock.lock()
+        let shutdownRequested = isShutdown
+        let serverIsRunning = serverProcess?.isRunning == true
+        lifecycleLock.unlock()
+        if shutdownRequested { throw ServiceError.server("Codex Meter 正在退出") }
+        if serverIsRunning { return }
+        resetServer()
+
+        guard let executable = cachedExecutable ?? codexExecutable else {
             throw ServiceError.binaryMissing
         }
+        cachedExecutable = executable
 
         let process = Process()
         let input = Pipe()
         let output = Pipe()
         let errors = Pipe()
+        let collector = JSONLineResponseCollector()
         process.executableURL = executable
         process.arguments = ["app-server"]
         process.standardInput = input
@@ -192,53 +292,109 @@ final class CodexUsageService {
         environment["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         process.environment = environment
 
-        let collector = JSONLineResponseCollector()
         output.fileHandleForReading.readabilityHandler = { handle in
             collector.append(handle.availableData)
         }
+        errors.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let self else { return }
+            self.errorLock.lock()
+            self.errorBuffer.append(data)
+            if self.errorBuffer.count > 8192 {
+                self.errorBuffer.removeFirst(self.errorBuffer.count - 8192)
+            }
+            self.errorLock.unlock()
+        }
+        process.terminationHandler = { _ in collector.close() }
 
         do {
             try process.run()
-            defer {
-                output.fileHandleForReading.readabilityHandler = nil
-                try? input.fileHandleForWriting.close()
+            lifecycleLock.lock()
+            if isShutdown {
+                lifecycleLock.unlock()
                 if process.isRunning { process.terminate() }
+                throw ServiceError.server("Codex Meter 正在退出")
             }
+            serverProcess = process
+            serverInput = input
+            serverOutput = output
+            serverErrors = errors
+            responseCollector = collector
+            lifecycleLock.unlock()
+            errorLock.lock()
+            errorBuffer.removeAll(keepingCapacity: true)
+            errorLock.unlock()
 
+            let initializeID = nextID()
             try send([
                 "method": "initialize",
-                "id": 0,
+                "id": initializeID,
                 "params": [
                     "clientInfo": [
                         "name": "codex_usage_widget",
                         "title": "Codex Meter",
-                        "version": "1.3.0"
+                        "version": "1.4.0"
                     ]
                 ]
             ], to: input.fileHandleForWriting)
 
-            guard let initialized = collector.wait(for: [0], timeout: 10),
-                  let initializeResponse = initialized[0] else {
+            guard let initialized = collector.wait(for: [initializeID], timeout: 10),
+                  let initializeResponse = initialized[initializeID] else {
                 throw ServiceError.server("Codex 初始化超时")
             }
             if let error = initializeResponse["error"] as? [String: Any] {
                 throw ServiceError.server(error["message"] as? String ?? "Codex 初始化失败")
             }
-
             try send(["method": "initialized", "params": [:]], to: input.fileHandleForWriting)
-            for request in requests {
-                try send(request, to: input.fileHandleForWriting)
-            }
-
-            guard let responses = collector.wait(for: responseIDs, timeout: 20) else {
-                throw ServiceError.timedOut
-            }
-            return responses
         } catch {
-            output.fileHandleForReading.readabilityHandler = nil
-            try? input.fileHandleForWriting.close()
-            if process.isRunning { process.terminate() }
+            resetServer()
             throw error
+        }
+    }
+
+    private func nextID() -> Int {
+        nextRequestID += 1
+        return nextRequestID
+    }
+
+    private func serverErrorMessage() -> String? {
+        errorLock.lock()
+        defer { errorLock.unlock() }
+        return String(data: errorBuffer, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func resetServer() {
+        lifecycleLock.lock()
+        let process = serverProcess
+        let input = serverInput
+        let output = serverOutput
+        let errors = serverErrors
+        let collector = responseCollector
+        serverProcess = nil
+        serverInput = nil
+        serverOutput = nil
+        serverErrors = nil
+        responseCollector = nil
+        lifecycleLock.unlock()
+
+        output?.fileHandleForReading.readabilityHandler = nil
+        errors?.fileHandleForReading.readabilityHandler = nil
+        try? input?.fileHandleForWriting.close()
+        collector?.close()
+        if process?.isRunning == true { process?.terminate() }
+    }
+
+    func shutdown() {
+        // App termination must not wait for an in-flight 20-second response wait.
+        // Wake the active response wait before synchronizing with the work queue.
+        lifecycleLock.lock()
+        isShutdown = true
+        let collector = responseCollector
+        lifecycleLock.unlock()
+        collector?.close()
+        workQueue.sync {
+            resetServer()
         }
     }
 
@@ -385,7 +541,7 @@ final class CodexUsageService {
         )
     }
 
-    private func localStats() -> LocalStats {
+    private func cachedLocalStats() -> LocalStats {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
         let today = calendar.startOfDay(for: Date())
@@ -395,39 +551,86 @@ final class CodexUsageService {
             guard let date = calendar.date(byAdding: .day, value: offset, to: historyStart) else { return nil }
             return formatter.string(from: date)
         }
-        var dailyTokens = Dictionary(uniqueKeysWithValues: dayKeys.map { ($0, 0) })
         let todayKey = formatter.string(from: today)
+        let windowKey = "\(TimeZone.current.identifier)|\(TimeZone.current.secondsFromGMT())|\(todayKey)"
+        if sessionWindowKey != windowKey {
+            sessionFiles.removeAll()
+            sessionWindowKey = windowKey
+        }
 
         let environment = ProcessInfo.processInfo.environment
         let codexHome: URL
         if let configuredHome = environment["CODEX_HOME"], !configuredHome.isEmpty {
             codexHome = URL(fileURLWithPath: configuredHome)
         } else {
-            codexHome = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".codex")
+            codexHome = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
         }
         let directory = codexHome.appendingPathComponent("sessions")
-
         guard let enumerator = FileManager.default.enumerator(
             at: directory,
-            includingPropertiesForKeys: [.contentModificationDateKey],
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
             options: [.skipsHiddenFiles]
         ) else {
+            sessionFiles.removeAll()
             return LocalStats(
                 dailyTokens: dayKeys.map { DailyTokenStats(date: $0, tokens: 0) },
                 conversations: []
             )
         }
 
+        var totals = Dictionary(uniqueKeysWithValues: dayKeys.map { ($0, 0) })
         var conversations: [String: ConversationStats] = [:]
+        var seen = Set<String>()
         for case let file as URL in enumerator where file.pathExtension == "jsonl" {
-            guard let values = try? file.resourceValues(forKeys: [.contentModificationDateKey]),
+            guard let values = try? file.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
                   let modifiedAt = values.contentModificationDate,
                   modifiedAt >= historyStart else { continue }
-            guard let contents = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            let signature = SessionFileSignature(size: values.fileSize ?? 0, modifiedAt: modifiedAt)
+            let path = file.path
+            seen.insert(path)
+
+            let stats: LocalStats
+            if let cached = sessionFiles[path], cached.signature == signature {
+                stats = cached.stats
+            } else if let parsed = parseSessionFile(file, dayKeys: dayKeys, todayKey: todayKey, formatter: formatter) {
+                stats = parsed
+                sessionFiles[path] = CachedSessionFile(signature: signature, stats: parsed)
+            } else {
+                sessionFiles.removeValue(forKey: path)
+                continue
+            }
+
+            for day in stats.dailyTokens where totals[day.date] != nil {
+                totals[day.date, default: 0] += day.tokens
+            }
+            for conversation in stats.conversations {
+                conversations[conversation.turnId] = conversation
+            }
+        }
+        let stalePaths = sessionFiles.keys.filter { !seen.contains($0) }
+        for path in stalePaths {
+            sessionFiles.removeValue(forKey: path)
+        }
+
+        return LocalStats(
+            dailyTokens: dayKeys.map { DailyTokenStats(date: $0, tokens: totals[$0] ?? 0) },
+            conversations: conversations.values.sorted { $0.startedAt > $1.startedAt }
+        )
+    }
+
+    private func parseSessionFile(
+        _ file: URL,
+        dayKeys: [String],
+        todayKey: String,
+        formatter: DateFormatter
+    ) -> LocalStats? {
+        var dailyTokens = Dictionary(uniqueKeysWithValues: dayKeys.map { ($0, 0) })
+        var conversations: [String: ConversationStats] = [:]
+        guard let contents = try? String(contentsOf: file, encoding: .utf8) else { return nil }
             var threadId: String?
             var contextWindowId: String?
             var currentTurnId: String?
+            var includeConversations = true
             var previousTotal = 0
             var usageRecordSinceTokenCount = false
 
@@ -439,6 +642,7 @@ final class CodexUsageService {
 
                 if rootType == "session_meta" {
                     threadId = payload["id"] as? String ?? threadId
+                    includeConversations = self.isUserConversationSession(payload)
                     if let contextWindow = payload["context_window"] as? [String: Any] {
                         contextWindowId = contextWindow["window_id"] as? String ?? contextWindowId
                     }
@@ -451,6 +655,7 @@ final class CodexUsageService {
                         let turnId = payload["turn_id"] as? String ?? UUID().uuidString.lowercased()
                         currentTurnId = turnId
                         guard let startedAt = self.parseTimestamp(object["timestamp"] as? String),
+                              includeConversations,
                               formatter.string(from: startedAt) == todayKey else { return }
                         conversations[turnId] = ConversationStats(
                             turnId: turnId,
@@ -536,7 +741,6 @@ final class CodexUsageService {
                     conversations[turnId] = conversation
                 }
             }
-        }
 
         return LocalStats(
             dailyTokens: dayKeys.map { DailyTokenStats(date: $0, tokens: dailyTokens[$0] ?? 0) },
@@ -551,6 +755,17 @@ final class CodexUsageService {
         if let date = formatter.date(from: value) { return date }
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.date(from: value)
+    }
+
+    private func isUserConversationSession(_ payload: [String: Any]) -> Bool {
+        if let threadSource = payload["thread_source"] as? String,
+           !threadSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return threadSource.caseInsensitiveCompare("user") == .orderedSame
+        }
+        if let source = payload["source"] as? [String: Any], source["subagent"] != nil {
+            return false
+        }
+        return true
     }
 
     private func normalizePreview(_ value: String) -> String {

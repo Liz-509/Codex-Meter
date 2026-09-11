@@ -86,14 +86,114 @@ class CodexUsageWidget extends HTMLElement {
     this.expandedConversationGroups = new Set();
     this.pointerInside = false;
     this.resetting = false;
+    this.hostActive = window.codexMeterHostActive !== false;
+    this.pageVisible = !document.hidden;
+    this.motionSettleTimer = null;
+    this.transitionTimer = null;
+    this.compactMotionTimer = null;
+    this.compactMotionStartedAt = performance.now();
+    this.onVisibilityChanged = () => {
+      this.pageVisible = !document.hidden;
+      this.updateMotionState();
+      if (!this.pageVisible) this.finishQuotaFill();
+    };
   }
 
   connectedCallback() {
     this.render();
     this.bindEvents();
     if (this.autoHover) this.bindHoverExpansion();
+    document.addEventListener("visibilitychange", this.onVisibilityChanged);
+    this.updateMotionState();
     requestAnimationFrame(() => this.syncNativeSize(false));
     this.refresh();
+  }
+
+  disconnectedCallback() {
+    document.removeEventListener("visibilitychange", this.onVisibilityChanged);
+    clearTimeout(this.hoverCloseTimer);
+    clearTimeout(this.collapseResizeTimer);
+    clearTimeout(this.suppressHoverTimer);
+    clearTimeout(this.motionSettleTimer);
+    clearTimeout(this.transitionTimer);
+    clearInterval(this.compactMotionTimer);
+    this.compactMotionTimer = null;
+    cancelAnimationFrame(this.quotaAnimationFrame);
+  }
+
+  setHostActive(active) {
+    this.hostActive = active !== false;
+    this.updateMotionState();
+    if (!this.hostActive) this.finishQuotaFill();
+  }
+
+  updateMotionState() {
+    const widget = this.shadowRoot.querySelector(".widget");
+    if (!widget) return;
+    this.classList.toggle("motion-paused", !this.hostActive || !this.pageVisible);
+    widget.classList.toggle("compact-motion", this.autoHover && this.collapsed);
+    const compactMotionActive = this.autoHover && this.collapsed && this.hostActive && this.pageVisible;
+    if (compactMotionActive) {
+      this.startCompactMotion();
+    } else {
+      this.stopCompactMotion();
+    }
+  }
+
+  startCompactMotion() {
+    if (this.compactMotionTimer != null) return;
+    this.compactMotionStartedAt = performance.now();
+    const draw = () => this.drawCompactMotion(performance.now() - this.compactMotionStartedAt);
+    draw();
+    // CSS step animations still wake Chromium at the display refresh rate. A single
+    // timer updates every moving liquid layer together and only invalidates the tiny icon.
+    this.compactMotionTimer = setInterval(draw, 40);
+  }
+
+  stopCompactMotion() {
+    if (this.compactMotionTimer == null) return;
+    clearInterval(this.compactMotionTimer);
+    this.compactMotionTimer = null;
+  }
+
+  drawCompactMotion(elapsed) {
+    const icon = this.shadowRoot.querySelector(".brand-icon");
+    if (!icon) return;
+
+    const phase = (duration) => (elapsed % duration) / duration;
+    const shimmerCycle = phase(6400);
+    const shimmerLinear = shimmerCycle <= .5 ? shimmerCycle * 2 : (1 - shimmerCycle) * 2;
+    const shimmerEase = shimmerLinear * shimmerLinear * (3 - 2 * shimmerLinear);
+    const bubblePhase = phase(2600);
+    const bubbleOpacity = bubblePhase < .18
+      ? .48 * bubblePhase / .18
+      : bubblePhase < .82
+        ? .48 - (.16 * (bubblePhase - .18) / .64)
+        : .32 * (1 - bubblePhase) / .18;
+
+    icon.style.setProperty("--compact-shimmer-x", `${-12 + 24 * shimmerEase}%`);
+    icon.style.setProperty("--compact-shimmer-y", `${-5 + 10 * shimmerEase}%`);
+    icon.style.setProperty("--compact-bubbles-y", `${8 - 26 * bubblePhase}px`);
+    icon.style.setProperty("--compact-bubbles-opacity", bubbleOpacity.toFixed(3));
+    icon.style.setProperty("--compact-wave-front-x", `${-30 * phase(1550)}px`);
+    icon.style.setProperty("--compact-wave-back-x", `${-30 * (1 - phase(2350))}px`);
+  }
+
+  finishQuotaFill() {
+    cancelAnimationFrame(this.quotaAnimationFrame);
+    this.quotaAnimationFrame = null;
+    const ring = this.shadowRoot.querySelector(".primary-ring");
+    const fill = this.shadowRoot.querySelector(".secondary-fill");
+    ring?.style.setProperty("--value", this.data.primary.remainingPercent ?? 0);
+    if (fill) fill.style.width = `${this.data.secondary.remainingPercent ?? 0}%`;
+  }
+
+  beginPanelTransition() {
+    const widget = this.shadowRoot.querySelector(".widget");
+    if (!widget) return;
+    clearTimeout(this.transitionTimer);
+    widget.classList.add("is-transitioning");
+    this.transitionTimer = setTimeout(() => widget.classList.remove("is-transitioning"), 340);
   }
 
   async refresh() {
@@ -400,14 +500,12 @@ class CodexUsageWidget extends HTMLElement {
       const firstTime = this.formatConversationTime(group.turns[0]?.startedAt);
       const lastTime = this.formatConversationTime(group.turns.at(-1)?.startedAt);
       const timeRange = firstTime === lastTime || lastTime === "—" ? firstTime : `${firstTime}–${lastTime}`;
-      const allTokensKnown = group.turns.every((conversation) =>
-        conversation.tokens != null && Number.isFinite(Number(conversation.tokens)));
-      const totalTokens = allTokensKnown
-        ? group.turns.reduce((total, conversation) => total + Math.max(0, Number(conversation.tokens)), 0)
-        : null;
-      const groupTokenBadge = totalTokens == null
-        ? ""
-        : `<span class="conversation-group-tokens">${this.escapeHTML(this.formatNumber(totalTokens))} Tokens</span>`;
+      const totalTokens = group.turns.reduce((total, conversation) => {
+        if (conversation.tokens == null) return total;
+        const tokens = Number(conversation.tokens);
+        return total + (Number.isFinite(tokens) ? Math.max(0, tokens) : 0);
+      }, 0);
+      const groupTokenBadge = `<span class="conversation-group-tokens">${this.escapeHTML(this.formatNumber(totalTokens))} Tokens</span>`;
       const rows = group.turns.map((conversation) => {
         const tokenBadge = conversation.tokens == null
           ? ""
@@ -520,9 +618,11 @@ class CodexUsageWidget extends HTMLElement {
       this.dragging = true;
       clearTimeout(this.hoverCloseTimer);
       clearTimeout(this.collapseResizeTimer);
+      clearTimeout(this.motionSettleTimer);
       this.collapsed = true;
       this.setPanelAnchor({ compactX: 0, compactY: 0, pointerX: 33, pointerY: 33 });
-      this.shadowRoot.querySelector(".widget")?.classList.add("collapsed", "dragging");
+      this.shadowRoot.querySelector(".widget")?.classList.add("collapsed", "collapsed-settled", "dragging");
+      this.updateMotionState();
     };
 
     const enter = (pointer) => {
@@ -531,6 +631,7 @@ class CodexUsageWidget extends HTMLElement {
       if (this.suppressHoverUntilLeave) return;
       clearTimeout(this.hoverCloseTimer);
       clearTimeout(this.collapseResizeTimer);
+      clearTimeout(this.motionSettleTimer);
       if (!this.collapsed) return;
       if (Number.isFinite(pointer?.x ?? pointer?.clientX) && Number.isFinite(pointer?.y ?? pointer?.clientY)) {
         this.expansionPointer = {
@@ -539,9 +640,13 @@ class CodexUsageWidget extends HTMLElement {
         };
       }
       this.collapsed = false;
+      const widget = this.shadowRoot.querySelector(".widget");
+      widget?.classList.remove("collapsed-settled");
+      this.beginPanelTransition();
+      this.updateMotionState();
       this.syncNativeSize(false);
       requestAnimationFrame(() => requestAnimationFrame(() => {
-        this.shadowRoot.querySelector(".widget")?.classList.remove("collapsed");
+        widget?.classList.remove("collapsed");
         this.animateQuotaFill();
       }));
     };
@@ -578,8 +683,9 @@ class CodexUsageWidget extends HTMLElement {
       });
       this.collapsed = true;
       const widget = this.shadowRoot.querySelector(".widget");
-      widget?.classList.add("collapsed");
+      widget?.classList.add("collapsed", "collapsed-settled");
       widget?.classList.remove("dragging");
+      this.updateMotionState();
       this.syncNativeSize(false);
     };
     this.addEventListener("mouseenter", enter);
@@ -616,10 +722,17 @@ class CodexUsageWidget extends HTMLElement {
     this.hoverCloseTimer = setTimeout(() => {
       if (this.collapsed || this.dragging || this.activeDialog || this.pointerInside) return;
       this.collapsed = true;
-      this.shadowRoot.querySelector(".widget")?.classList.add("collapsed");
+      const widget = this.shadowRoot.querySelector(".widget");
+      widget?.classList.add("collapsed");
+      this.beginPanelTransition();
+      this.updateMotionState();
       this.collapseResizeTimer = setTimeout(() => {
         if (this.collapsed) this.syncNativeSize(false);
       }, 280);
+      clearTimeout(this.motionSettleTimer);
+      this.motionSettleTimer = setTimeout(() => {
+        if (this.collapsed) widget?.classList.add("collapsed-settled");
+      }, 300);
     }, 120);
   }
 
@@ -631,9 +744,8 @@ class CodexUsageWidget extends HTMLElement {
 
     const primaryTarget = this.data.primary.remainingPercent ?? 0;
     const secondaryTarget = this.data.secondary.remainingPercent ?? 0;
-    if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      ring.style.setProperty("--value", primaryTarget);
-      fill.style.width = `${secondaryTarget}%`;
+    if (this.collapsed || !this.hostActive || !this.pageVisible || matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      this.finishQuotaFill();
       return;
     }
 
@@ -733,11 +845,12 @@ class CodexUsageWidget extends HTMLElement {
   render() {
     this.shadowRoot.innerHTML = `
       <style>${this.styles}</style>
-      <section class="widget ${this.collapsed ? "collapsed" : ""}" aria-label="Codex Meter">
+      <section class="widget ${this.collapsed ? "collapsed collapsed-settled compact-motion" : ""}" aria-label="Codex Meter">
         <header>
           <div class="brand">
             <span class="brand-icon" style="--liquid-level:${this.data.primary.remainingPercent ?? 0}">
               <span class="brand-liquid" aria-hidden="true">
+                <span class="brand-liquid-fill"></span>
                 <svg class="liquid-wave liquid-wave-back" viewBox="0 0 60 10" preserveAspectRatio="none"><path d="M0 5 Q7.5 0 15 5 T30 5 T45 5 T60 5 V10 H0 Z"/></svg>
                 <svg class="liquid-wave liquid-wave-front" viewBox="0 0 60 10" preserveAspectRatio="none"><path d="M0 5 Q7.5 9 15 5 T30 5 T45 5 T60 5 V10 H0 Z"/></svg>
               </span>
@@ -821,7 +934,10 @@ class CodexUsageWidget extends HTMLElement {
       * { box-sizing:border-box; }
       .widget { position:relative; width:min(360px,calc(100vw - 32px)); border:1px solid var(--line); border-radius:24px; overflow:hidden; background:var(--bg); box-shadow:var(--shadow); backdrop-filter:blur(28px) saturate(1.35); -webkit-backdrop-filter:blur(28px) saturate(1.35); transition:width .3s cubic-bezier(.2,.8,.2,1),background .2s; }
       :host([native]) { width:100vw; }
-      :host([native]) .widget { --compact-x:0px; --compact-y:0px; --expand-x:33px; --expand-y:33px; width:360px; border:0; box-shadow:none; clip-path:inset(0 0 0 0 round 24px); will-change:clip-path; transition:clip-path .28s cubic-bezier(.2,.8,.2,1),background .2s; }
+      :host([native]) .widget { --compact-x:0px; --compact-y:0px; --expand-x:33px; --expand-y:33px; width:360px; border:0; box-shadow:none; clip-path:inset(0 0 0 0 round 24px); transition:clip-path .28s cubic-bezier(.2,.8,.2,1),background .2s; }
+      :host([native]) .widget.is-transitioning { will-change:clip-path; }
+      :host([native]) .widget.is-transitioning header,
+      :host([native]) .widget.is-transitioning .body { will-change:transform,opacity; }
       :host([native]) .widget.dragging,
       :host([native]) .widget.dragging header,
       :host([native]) .widget.dragging .body { transition:none!important; }
@@ -834,7 +950,9 @@ class CodexUsageWidget extends HTMLElement {
       .brand-icon { --liquid-empty:rgba(92,82,210,.48); position:relative; width:30px; height:30px; display:grid; place-items:center; flex:0 0 auto; overflow:hidden; border-radius:9px; color:white; background:var(--liquid-empty); box-shadow:inset 0 1px 0 rgba(255,255,255,.35),0 5px 14px var(--quota-glow); transition:background .35s ease,box-shadow .35s ease; }
       .brand-icon.quota-warning { --liquid-empty:rgba(190,125,10,.5); }
       .brand-icon.quota-critical { --liquid-empty:rgba(190,50,65,.5); }
-      .brand-liquid { position:absolute; right:0; bottom:0; left:0; height:calc(var(--liquid-level)*1%); opacity:clamp(0,var(--liquid-level),1); color:var(--quota-end); background:linear-gradient(145deg,var(--quota-start),var(--quota-end)); background-size:180% 180%; animation:liquid-shimmer 3.2s ease-in-out infinite alternate; transition:height .75s cubic-bezier(.2,.8,.2,1),opacity .25s ease,background .35s ease,color .35s ease; }
+      .brand-liquid { position:absolute; right:0; bottom:0; left:0; height:calc(var(--liquid-level)*1%); opacity:clamp(0,var(--liquid-level),1); color:var(--quota-end); transition:height .75s cubic-bezier(.2,.8,.2,1),opacity .25s ease,color .35s ease; }
+      .brand-liquid-fill { position:absolute; inset:0; overflow:hidden; }
+      .brand-liquid-fill::before { content:""; position:absolute; inset:-24% -42%; background:linear-gradient(145deg,var(--quota-start),var(--quota-end)); animation:liquid-shimmer 3.2s ease-in-out infinite alternate; }
       .brand-liquid::after { content:""; position:absolute; inset:0; background:radial-gradient(circle at 24% 76%,rgba(255,255,255,.7) 0 1px,transparent 1.4px),radial-gradient(circle at 68% 88%,rgba(255,255,255,.5) 0 1.2px,transparent 1.7px),radial-gradient(circle at 82% 48%,rgba(255,255,255,.38) 0 .8px,transparent 1.3px); animation:liquid-bubbles 2.6s linear infinite; }
       .liquid-wave { position:absolute; top:-6px; left:0; width:60px!important; height:10px; overflow:visible; fill:currentColor!important; animation:liquid-flow 1.55s linear infinite; }
       .liquid-wave-back { top:-4px; opacity:.42; animation-direction:reverse; animation-duration:2.35s; }
@@ -864,6 +982,15 @@ class CodexUsageWidget extends HTMLElement {
       :host([native]) .actions { opacity:1; transition:opacity .15s ease .1s; }
       :host([native]) .collapsed .brand > div,
       :host([native]) .collapsed .actions { opacity:0; pointer-events:none; transition-delay:0s; }
+      :host([native]) .collapsed-settled .body { visibility:hidden; content-visibility:hidden; }
+      :host([native]) .compact-motion .brand-liquid-fill::before { animation:none; transform:translate3d(var(--compact-shimmer-x,-12%),var(--compact-shimmer-y,-5%),0); }
+      :host([native]) .compact-motion .brand-liquid::after { animation:none; opacity:var(--compact-bubbles-opacity,0); transform:translate3d(0,var(--compact-bubbles-y,8px),0); }
+      :host([native]) .compact-motion .liquid-wave-front { animation:none; transform:translate3d(var(--compact-wave-front-x,0),0,0); }
+      :host([native]) .compact-motion .liquid-wave-back { animation:none; transform:translate3d(var(--compact-wave-back-x,-30px),0,0); }
+      :host(.motion-paused) *,
+      :host(.motion-paused) *::before,
+      :host(.motion-paused) *::after { animation-play-state:paused!important; }
+      :host(.motion-paused) .brand-liquid { transition:none; }
       :host([native]) [data-action="collapse"] { display:none; }
       .collapsed header { border-bottom-color:transparent; }
       .collapsed [data-action="collapse"] { transform:rotate(-90deg); }
@@ -953,9 +1080,9 @@ class CodexUsageWidget extends HTMLElement {
       .dialog-empty { width:100%; height:100%; display:grid; place-items:center; color:var(--muted); font-size:11px; text-align:center; }
       .loading [data-action="refresh"] svg { animation:spin .8s linear infinite; }
       @keyframes spin { to { transform:rotate(360deg); } }
-      @keyframes liquid-flow { from { transform:translateX(0); } to { transform:translateX(-30px); } }
-      @keyframes liquid-shimmer { from { background-position:0% 25%; } to { background-position:100% 75%; } }
-      @keyframes liquid-bubbles { 0% { transform:translateY(8px); opacity:0; } 18% { opacity:.48; } 82% { opacity:.32; } 100% { transform:translateY(-18px); opacity:0; } }
+      @keyframes liquid-flow { from { transform:translate3d(0,0,0); } to { transform:translate3d(-30px,0,0); } }
+      @keyframes liquid-shimmer { from { transform:translate3d(-12%,-5%,0); } to { transform:translate3d(12%,5%,0); } }
+      @keyframes liquid-bubbles { 0% { transform:translate3d(0,8px,0); opacity:0; } 18% { opacity:.48; } 82% { opacity:.32; } 100% { transform:translate3d(0,-18px,0); opacity:0; } }
       @keyframes theme-orbit { 0% { transform:rotate(0) scale(1); } 48% { transform:rotate(-22deg) scale(1.18); } 76% { transform:rotate(7deg) scale(1.06); } 100% { transform:rotate(0) scale(1); } }
       @keyframes refresh-turn { to { transform:rotate(360deg); } }
       @keyframes close-pop { 0% { transform:rotate(0) scale(1); } 60% { transform:rotate(96deg) scale(1.16); } 100% { transform:rotate(90deg) scale(1.08); } }
@@ -972,3 +1099,4 @@ window.updateCodexUsage = (payload) => document.querySelector("codex-usage-widge
 window.codexResetResult = (payload) => document.querySelector("codex-usage-widget")?.handleResetResult(payload);
 window.recordCodexTurn = (usage) => document.querySelector("codex-usage-widget")?.recordTurn(usage);
 window.codexUsageSetPanelAnchor = (payload) => document.querySelector("codex-usage-widget")?.setPanelAnchor(payload);
+window.codexUsageSetHostActive = (active) => document.querySelector("codex-usage-widget")?.setHostActive(active);
