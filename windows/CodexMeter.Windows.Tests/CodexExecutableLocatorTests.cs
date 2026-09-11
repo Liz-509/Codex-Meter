@@ -6,6 +6,17 @@ namespace CodexMeter.Windows.Tests;
 public sealed class CodexExecutableLocatorTests
 {
     [TestMethod]
+    public void CreateStartInfo_UsesUtf8ForAppServerPipes()
+    {
+        var startInfo = new CodexCommand(@"C:\Tools\codex.exe").CreateStartInfo();
+
+        Assert.AreEqual("utf-8", startInfo.StandardInputEncoding?.WebName);
+        Assert.AreEqual("utf-8", startInfo.StandardOutputEncoding?.WebName);
+        Assert.AreEqual("utf-8", startInfo.StandardErrorEncoding?.WebName);
+        Assert.IsFalse(startInfo.StandardInputEncoding!.GetPreamble().Any());
+    }
+
+    [TestMethod]
     public void Find_PrefersExplicitOverride()
     {
         const string overridePath = @"C:\Tools\codex.exe";

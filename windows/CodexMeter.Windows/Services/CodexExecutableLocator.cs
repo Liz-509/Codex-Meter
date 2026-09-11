@@ -1,10 +1,13 @@
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 
 namespace CodexMeter.Windows.Services;
 
 internal sealed record CodexCommand(string ExecutablePath)
 {
+    private static readonly Encoding Utf8WithoutBom = new UTF8Encoding(false);
+
     public ProcessStartInfo CreateStartInfo()
     {
         var extension = Path.GetExtension(ExecutablePath);
@@ -30,6 +33,9 @@ internal sealed record CodexCommand(string ExecutablePath)
         startInfo.RedirectStandardInput = true;
         startInfo.RedirectStandardOutput = true;
         startInfo.RedirectStandardError = true;
+        startInfo.StandardInputEncoding = Utf8WithoutBom;
+        startInfo.StandardOutputEncoding = Utf8WithoutBom;
+        startInfo.StandardErrorEncoding = Utf8WithoutBom;
         startInfo.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         return startInfo;
     }
