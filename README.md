@@ -6,8 +6,8 @@ A lightweight native usage widget for Codex on macOS and Windows. It starts as a
 
 ## Download
 
-- [macOS Apple Silicon — Codex Meter v1.1.2](https://github.com/Liz-509/Codex-Meter/releases/download/v1.1.2/Codex-Meter-macOS-arm64-v1.1.2.zip)
-- [Windows 10/11 x64 — Codex Meter v1.1.2](https://github.com/Liz-509/Codex-Meter/releases/download/v1.1.2/Codex-Meter-Windows-x64-v1.1.2.zip)
+- [macOS Apple Silicon — Codex Meter v1.2.0](https://github.com/Liz-509/Codex-Meter/releases/download/v1.2.0/Codex-Meter-macOS-arm64-v1.2.0.zip)
+- [Windows 10/11 x64 — Codex Meter v1.2.0](https://github.com/Liz-509/Codex-Meter/releases/download/v1.2.0/Codex-Meter-Windows-x64-v1.2.0.zip)
 
 Unzip the archive. On macOS, move `Codex Meter.app` to your Applications folder and open it. On Windows, run `Codex Meter.exe` directly; installation and administrator access are not required. Intel Mac users can build from source.
 
@@ -16,8 +16,10 @@ Because the app is not notarized, macOS may ask you to confirm the first launch.
 ## Features
 
 - Shows the five-hour limit, weekly limit, reset times, and available reset credits.
-- Totals today's tokens and questions in the device's local time zone.
+- Uses a live liquid level in the compact icon and changes quota indicators to yellow below 20% and red below 10%.
+- Totals today's tokens and conversations in the device's local time zone.
 - Supports automatic, light, and dark themes.
+- Keeps the expanded panel inside the current screen and opens it from the hovered icon position near screen edges.
 - Floats above other windows; the macOS build appears across Spaces and full-screen apps.
 - Remains interactive when another app is in front.
 - Includes animated quota indicators and button micro-interactions.
@@ -68,14 +70,14 @@ Install the .NET 8 SDK, clone the repository, and run the following command in P
 .\scripts\build-windows.ps1
 ```
 
-The self-contained x64 app is written to `build\windows\win-x64`, and the portable archive is written to `outputs\Codex-Meter-Windows-x64-v1.1.2.zip`. Extract the archive and run `Codex Meter.exe`; installation and administrator access are not required.
+The self-contained x64 app is written to `build\windows\win-x64`, and the portable archive is written to `outputs\Codex-Meter-Windows-x64-v1.2.0.zip`. Extract the archive and run `Codex Meter.exe`; installation and administrator access are not required.
 
-The Windows app stays on top on the current virtual desktop and includes a system tray menu. Windows does not expose a stable public equivalent of macOS “all Spaces,” and exclusive full-screen games may cover the widget.
+The Windows app stays on top on the current virtual desktop and includes a system tray menu. Its executable, taskbar window, and tray entry use the same Codex Meter icon. Windows does not expose a stable public equivalent of macOS “all Spaces,” and exclusive full-screen games may cover the widget.
 
 ## Data sources
 
 - Limits, reset times, and reset credits come from the Codex App Server account endpoints.
-- Today's tokens and question count are calculated locally from structured events in `~/.codex/sessions`.
+- Today's tokens and conversation count are calculated locally from structured events in `~/.codex/sessions` (or `$CODEX_HOME/sessions` when configured).
 
 The first Codex App Server launch may be slower. Codex Meter displays local statistics first and retries limit requests automatically when needed.
 
@@ -83,13 +85,13 @@ The first Codex App Server launch may be slower. Codex Meter displays local stat
 
 Codex Meter checks these locations in order:
 
-1. The `CODEX_BINARY` environment variable.
+1. The `CODEX_BINARY` or `CODEX_CLI_PATH` environment variable.
 2. `/Applications/ChatGPT.app/Contents/Resources/codex`.
 3. `~/Applications/ChatGPT.app/Contents/Resources/codex`.
 4. `~/.codex/plugins/.plugin-appserver/codex`.
 5. `/opt/homebrew/bin/codex` and `/usr/local/bin/codex`.
 
-On Windows it checks `CODEX_BINARY`, `PATH`, the npm global command directory, Windows app aliases, and common ChatGPT installation directories. Native Windows Codex and ChatGPT share `%USERPROFILE%\.codex`; set `CODEX_HOME` when you intentionally keep sessions elsewhere.
+On Windows it checks `CODEX_BINARY`, `CODEX_CLI_PATH`, `PATH`, official standalone installs, relocated Codex Desktop runtimes, the Microsoft Store app cache, the npm global command directory, Windows app aliases, and common ChatGPT installation directories. Native Windows Codex and ChatGPT share `%USERPROFILE%\.codex`; set `CODEX_HOME` when you intentionally keep sessions elsewhere. macOS also honors `CODEX_HOME` and reads its `sessions` directory, so both native apps support the same explicit Codex path and data-home overrides.
 
 ## Web component preview
 

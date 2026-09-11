@@ -144,7 +144,7 @@ final class CodexUsageService {
                     "clientInfo": [
                         "name": "codex_usage_widget",
                         "title": "Codex Meter",
-                        "version": "1.1.2"
+                        "version": "1.2.0"
                     ]
                 ]
             ], to: input.fileHandleForWriting)
@@ -199,9 +199,11 @@ final class CodexUsageService {
     private var codexExecutable: URL? {
         let home = FileManager.default.homeDirectoryForCurrentUser
         var candidates: [URL] = []
-        if let customPath = ProcessInfo.processInfo.environment["CODEX_BINARY"],
-           !customPath.isEmpty {
-            candidates.append(URL(fileURLWithPath: customPath))
+        for variable in ["CODEX_BINARY", "CODEX_CLI_PATH"] {
+            if let customPath = ProcessInfo.processInfo.environment[variable],
+               !customPath.isEmpty {
+                candidates.append(URL(fileURLWithPath: customPath))
+            }
         }
         candidates.append(contentsOf: [
             URL(fileURLWithPath: "/Applications/ChatGPT.app/Contents/Resources/codex"),
@@ -235,8 +237,15 @@ final class CodexUsageService {
         let startTimestamp = isoFormatter.string(from: start)
         let endTimestamp = isoFormatter.string(from: end)
 
-        let directory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex/sessions")
+        let environment = ProcessInfo.processInfo.environment
+        let codexHome: URL
+        if let configuredHome = environment["CODEX_HOME"], !configuredHome.isEmpty {
+            codexHome = URL(fileURLWithPath: configuredHome)
+        } else {
+            codexHome = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".codex")
+        }
+        let directory = codexHome.appendingPathComponent("sessions")
 
         guard let enumerator = FileManager.default.enumerator(
             at: directory,

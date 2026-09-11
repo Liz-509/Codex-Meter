@@ -56,7 +56,7 @@ internal sealed class CodexUsageService
     private async Task<(JsonObject Limits, JsonObject Usage)> ReadAccountDataAsync(CancellationToken cancellationToken)
     {
         var command = _locator.FindFromEnvironment()
-            ?? throw new InvalidOperationException("未找到 Codex。请安装 Windows 版 ChatGPT/Codex，或设置 CODEX_BINARY。");
+            ?? throw new InvalidOperationException("未找到 Codex。请安装 Windows 版 Codex，或设置 CODEX_BINARY / CODEX_CLI_PATH。");
 
         using var process = new Process { StartInfo = command.CreateStartInfo(), EnableRaisingEvents = true };
         if (!process.Start()) throw new InvalidOperationException("Codex App Server 启动失败。");
@@ -79,7 +79,7 @@ internal sealed class CodexUsageService
                     {
                         ["name"] = "codex_usage_widget",
                         ["title"] = "Codex Meter",
-                        ["version"] = "1.1.2"
+                        ["version"] = "1.2.0"
                     }
                 }
             });

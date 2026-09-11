@@ -7,7 +7,8 @@ final class FloatingPanel: NSPanel {
 }
 
 final class HoverWebView: WKWebView {
-    var onHoverChanged: ((Bool) -> Void)?
+    var onHoverChanged: ((Bool, NSPoint?) -> Void)?
+    var suppressHoverExit = false
     private var hoverTrackingArea: NSTrackingArea?
 
     override func updateTrackingAreas() {
@@ -26,24 +27,23 @@ final class HoverWebView: WKWebView {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        onHoverChanged?(true)
+        let point = convert(event.locationInWindow, from: nil)
+        let pointer = NSPoint(
+            x: point.x,
+            y: isFlipped ? point.y : bounds.height - point.y
+        )
+        onHoverChanged?(true, pointer)
         super.mouseEntered(with: event)
     }
 
     override func mouseExited(with event: NSEvent) {
-        onHoverChanged?(false)
-        super.mouseExited(with: event)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        let distanceFromTop = isFlipped ? point.y : bounds.height - point.y
-        if point.x >= 0, point.x <= 66, distanceFromTop >= 0, distanceFromTop <= 66,
-           let window {
-            window.performDrag(with: event)
-            return
+        if suppressHoverExit { return }
+        if let contentView = window?.contentView {
+            let location = contentView.convert(event.locationInWindow, from: nil)
+            if contentView.bounds.contains(location) { return }
         }
-        super.mouseDown(with: event)
+        onHoverChanged?(false, nil)
+        super.mouseExited(with: event)
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
@@ -51,9 +51,102 @@ final class HoverWebView: WKWebView {
     }
 }
 
+final class NativeDragHandle: NSView {
+    var onHoverChanged: ((Bool, NSPoint?) -> Void)?
+    var onDragEnded: ((NSRect) -> Void)?
+    var onDragChanged: ((Bool) -> Void)?
+    private var hoverTrackingArea: NSTrackingArea?
+    private var isDragging = false
+    private var isDragCandidate = false
+    private var pointerOffset = NSPoint.zero
+
+    override func updateTrackingAreas() {
+        if let hoverTrackingArea { removeTrackingArea(hoverTrackingArea) }
+        let trackingArea = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea)
+        hoverTrackingArea = trackingArea
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        onHoverChanged?(true, NSPoint(x: point.x, y: bounds.height - point.y))
+        super.mouseEntered(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if isDragging { return }
+        if let contentView = window?.contentView {
+            let location = contentView.convert(event.locationInWindow, from: nil)
+            if contentView.bounds.contains(location) { return }
+        }
+        onHoverChanged?(false, nil)
+        super.mouseExited(with: event)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        let cursor = NSEvent.mouseLocation
+        pointerOffset = NSPoint(
+            x: cursor.x - window.frame.minX,
+            y: window.frame.maxY - cursor.y
+        )
+        isDragCandidate = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isDragCandidate, let window else { return }
+        if !isDragging {
+            isDragging = true
+            onDragChanged?(true)
+        }
+        let cursor = NSEvent.mouseLocation
+        window.setFrameOrigin(NSPoint(
+            x: cursor.x - pointerOffset.x,
+            y: cursor.y + pointerOffset.y - window.frame.height
+        ))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer { isDragCandidate = false }
+        guard isDragging, let window else { return }
+        isDragging = false
+        onDragChanged?(false)
+        onDragEnded?(window.frame)
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 final class PanelBridge: NSObject, WKScriptMessageHandler {
     weak var panel: NSPanel?
     var onUsageRequested: (() -> Void)?
+    private var compactFrame: NSRect?
+
+    func prepareForDrag() {
+        guard let panel else { return }
+        let frame = NSRect(
+            x: panel.frame.minX,
+            y: panel.frame.maxY - 66,
+            width: 66,
+            height: 66
+        )
+        compactFrame = frame
+        panel.setFrame(frame, display: true)
+        updateExpansionAnchor(compactX: 0, compactY: 0, pointerX: 33, pointerY: 33, in: panel)
+    }
+
+    func finishDrag(at frame: NSRect) {
+        compactFrame = frame
+        guard let panel else { return }
+        panel.setFrame(frame, display: true)
+        updateExpansionAnchor(compactX: 0, compactY: 0, pointerX: 33, pointerY: 33, in: panel)
+    }
 
     func userContentController(
         _ userContentController: WKUserContentController,
@@ -79,10 +172,25 @@ final class PanelBridge: NSObject, WKScriptMessageHandler {
         let requestedWidth = (body["width"] as? NSNumber)?.doubleValue ?? panel.frame.width
         let newWidth = CGFloat(min(max(requestedWidth, 66), 360))
         let newHeight = CGFloat(min(max(height, 66), 560))
-        var frame = panel.frame
-        frame.origin.y += frame.height - newHeight
+        let expanding = newWidth > 66 || newHeight > 66
+        let visibleFrame = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? panel.frame
+
+        if expanding, compactFrame == nil {
+            var savedFrame = panel.frame
+            savedFrame.size = NSSize(width: 66, height: 66)
+            compactFrame = savedFrame
+        }
+
+        let anchorFrame = compactFrame ?? panel.frame
+        var frame = anchorFrame
         frame.size.width = newWidth
         frame.size.height = newHeight
+        frame.origin.y = anchorFrame.maxY - newHeight
+        if expanding {
+            frame.origin.x = min(max(frame.origin.x, visibleFrame.minX), visibleFrame.maxX - newWidth)
+            frame.origin.y = min(max(frame.origin.y, visibleFrame.minY), visibleFrame.maxY - newHeight)
+        }
+
         if body["animated"] as? Bool == true {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.22
@@ -92,6 +200,41 @@ final class PanelBridge: NSObject, WKScriptMessageHandler {
         } else {
             panel.setFrame(frame, display: true)
         }
+
+        if expanding, let compactFrame {
+            let anchorX = CGFloat(min(max((body["anchorX"] as? NSNumber)?.doubleValue ?? 33, 0), 66))
+            let anchorY = CGFloat(min(max((body["anchorY"] as? NSNumber)?.doubleValue ?? 33, 0), 66))
+            updateExpansionAnchor(
+                compactX: compactFrame.minX - frame.minX,
+                compactY: frame.maxY - compactFrame.maxY,
+                pointerX: anchorX,
+                pointerY: anchorY,
+                in: panel
+            )
+        } else {
+            compactFrame = nil
+            updateExpansionAnchor(compactX: 0, compactY: 0, pointerX: 33, pointerY: 33, in: panel)
+        }
+    }
+
+    private func updateExpansionAnchor(
+        compactX: CGFloat,
+        compactY: CGFloat,
+        pointerX: CGFloat,
+        pointerY: CGFloat,
+        in panel: NSPanel
+    ) {
+        let payload: [String: Double] = [
+            "compactX": Double(compactX),
+            "compactY": Double(compactY),
+            "pointerX": Double(compactX + pointerX),
+            "pointerY": Double(compactY + pointerY)
+        ]
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8),
+              let webView = panel.contentView as? WKWebView else { return }
+        webView.evaluateJavaScript("window.codexUsageSetPanelAnchor?.(\(json));")
     }
 }
 
@@ -125,10 +268,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func createPanel() {
         let compactSize = NSSize(width: 66, height: 66)
-        let expandedSize = NSSize(width: 360, height: 443)
         let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let origin = NSPoint(
-            x: screenFrame.maxX - expandedSize.width - 18,
+            x: screenFrame.maxX - compactSize.width - 18,
             y: screenFrame.maxY - compactSize.height - 18
         )
 
@@ -173,13 +315,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let webView = HoverWebView(frame: panel.contentView?.bounds ?? .zero, configuration: configuration)
         webView.autoresizingMask = [.width, .height]
         webView.setValue(false, forKey: "drawsBackground")
-        webView.onHoverChanged = { [weak webView, weak panel] entered in
+        webView.onHoverChanged = { [weak webView, weak panel] entered, pointer in
             if entered {
                 NSApp.activate(ignoringOtherApps: true)
                 panel?.makeKeyAndOrderFront(nil)
             }
             let function = entered ? "window.codexUsageHoverEnter" : "window.codexUsageHoverLeave"
-            webView?.evaluateJavaScript("\(function)?.();")
+            var argument = ""
+            if let pointer,
+               let data = try? JSONSerialization.data(withJSONObject: ["x": pointer.x, "y": pointer.y]),
+               let json = String(data: data, encoding: .utf8) {
+                argument = json
+            }
+            webView?.evaluateJavaScript("\(function)?.(\(argument));")
+        }
+        let dragHandle = NativeDragHandle(frame: NSRect(
+            x: 0,
+            y: webView.isFlipped ? 0 : max(0, webView.bounds.height - 66),
+            width: 66,
+            height: 66
+        ))
+        dragHandle.autoresizingMask = webView.isFlipped ? [.maxYMargin] : [.minYMargin]
+        dragHandle.onHoverChanged = webView.onHoverChanged
+        dragHandle.onDragChanged = { [weak self, weak webView] dragging in
+            webView?.suppressHoverExit = dragging
+            if dragging {
+                self?.bridge.prepareForDrag()
+                webView?.evaluateJavaScript("window.codexUsageDragStarted?.();")
+            }
+        }
+        dragHandle.onDragEnded = { [weak self, weak webView] draggedFrame in
+            guard let self, let webView else { return }
+            let compactFrame = NSRect(
+                x: draggedFrame.minX,
+                y: draggedFrame.maxY - 66,
+                width: 66,
+                height: 66
+            )
+            self.bridge.finishDrag(at: compactFrame)
+            webView.evaluateJavaScript("window.codexUsageDragEnded?.();")
         }
 
         guard let resourceURL = Bundle.main.resourceURL,
@@ -191,6 +365,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         webView.loadFileURL(pageURL, allowingReadAccessTo: resourceURL)
         panel.contentView = webView
+        webView.addSubview(dragHandle, positioned: .above, relativeTo: nil)
         bridge.panel = panel
         bridge.onUsageRequested = { [weak self] in self?.refreshUsage() }
         self.webView = webView

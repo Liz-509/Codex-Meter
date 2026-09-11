@@ -13,6 +13,7 @@
     <AssemblyName>Codex Meter</AssemblyName>
     <RootNamespace>CodexMeter.Windows</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
     <PublishTrimmed>false</PublishTrimmed>
     <DebugType>embedded</DebugType>
   </PropertyGroup>
@@ -22,6 +23,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Resource Include="Assets\AppIcon.ico" />
     <Content Include="..\..\companion.html" Link="Resources\companion.html" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\usage-widget.js" Link="Resources\usage-widget.js" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
