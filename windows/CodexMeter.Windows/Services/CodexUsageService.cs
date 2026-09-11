@@ -9,6 +9,8 @@ namespace CodexMeter.Windows.Services;
 
 internal sealed class CodexUsageService
 {
+    private sealed record AppServerRequest(int Id, string Method, JsonObject? Params = null);
+
     private readonly CodexExecutableLocator _locator;
 
     public CodexUsageService(CodexExecutableLocator? locator = null)
@@ -42,8 +44,8 @@ internal sealed class CodexUsageService
 
         try
         {
-            var (limits, usage) = await ReadAccountDataAsync(cancellationToken);
-            return UsagePayloadBuilder.Build(stats, limits, usage, DateTimeOffset.Now);
+            var (limits, usage, threadNames) = await ReadAccountDataAsync(cancellationToken);
+            return UsagePayloadBuilder.Build(stats, limits, usage, DateTimeOffset.Now, threadNames);
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {
@@ -53,7 +55,51 @@ internal sealed class CodexUsageService
         }
     }
 
-    private async Task<(JsonObject Limits, JsonObject Usage)> ReadAccountDataAsync(CancellationToken cancellationToken)
+    public async Task<JsonObject> ConsumeResetCreditAsync(
+        string idempotencyKey,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var responses = await SendAccountRequestsAsync(
+                [new AppServerRequest(
+                    1,
+                    "account/rateLimitResetCredit/consume",
+                    new JsonObject { ["idempotencyKey"] = idempotencyKey })],
+                cancellationToken);
+            var result = GetResult(responses[0], "重置");
+            var outcome = result["outcome"]?.GetValue<string>()
+                ?? throw new InvalidOperationException("未收到重置结果。");
+            return new JsonObject { ["outcome"] = outcome };
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            return new JsonObject { ["error"] = error.Message };
+        }
+    }
+
+    private async Task<(JsonObject Limits, JsonObject Usage, IReadOnlyDictionary<string, string> ThreadNames)>
+        ReadAccountDataAsync(CancellationToken cancellationToken)
+    {
+        var responses = await SendAccountRequestsAsync(
+            [
+                new AppServerRequest(1, "account/rateLimits/read"),
+                new AppServerRequest(2, "account/usage/read"),
+                new AppServerRequest(
+                    3,
+                    "thread/list",
+                    new JsonObject { ["limit"] = 100, ["sortKey"] = "updated_at" })
+            ],
+            cancellationToken);
+        return (
+            GetResult(responses[0], "额度"),
+            GetResult(responses[1], "Token"),
+            GetThreadNames(responses[2]));
+    }
+
+    private async Task<JsonObject[]> SendAccountRequestsAsync(
+        IReadOnlyList<AppServerRequest> requests,
+        CancellationToken cancellationToken)
     {
         var command = _locator.FindFromEnvironment()
             ?? throw new InvalidOperationException("未找到 Codex。请安装 Windows 版 Codex，或设置 CODEX_BINARY / CODEX_CLI_PATH。");
@@ -79,7 +125,7 @@ internal sealed class CodexUsageService
                     {
                         ["name"] = "codex_usage_widget",
                         ["title"] = "Codex Meter",
-                        ["version"] = "1.2.0"
+                        ["version"] = "1.3.0"
                     }
                 }
             });
@@ -91,25 +137,21 @@ internal sealed class CodexUsageService
                 ["params"] = new JsonObject()
             });
 
-            var limitsResponse = Register(responses, 1);
-            var usageResponse = Register(responses, 2);
-            await SendAsync(process.StandardInput, new JsonObject
+            var pendingResponses = new List<Task<JsonObject>>(requests.Count);
+            foreach (var request in requests)
             {
-                ["method"] = "account/rateLimits/read",
-                ["id"] = 1
-            });
-            await SendAsync(process.StandardInput, new JsonObject
-            {
-                ["method"] = "account/usage/read",
-                ["id"] = 2
-            });
+                var response = Register(responses, request.Id);
+                pendingResponses.Add(response.Task.WaitAsync(TimeSpan.FromSeconds(20), cancellationToken));
+                var message = new JsonObject
+                {
+                    ["method"] = request.Method,
+                    ["id"] = request.Id
+                };
+                if (request.Params is not null) message["params"] = request.Params.DeepClone();
+                await SendAsync(process.StandardInput, message);
+            }
 
-            var completed = await Task.WhenAll(
-                limitsResponse.Task.WaitAsync(TimeSpan.FromSeconds(20), cancellationToken),
-                usageResponse.Task.WaitAsync(TimeSpan.FromSeconds(20), cancellationToken));
-            return (
-                GetResult(completed[0], "额度"),
-                GetResult(completed[1], "Token"));
+            return await Task.WhenAll(pendingResponses);
         }
         catch (TimeoutException)
         {
@@ -128,14 +170,7 @@ internal sealed class CodexUsageService
         }
     }
 
-    private static JsonObject CreateLocalPayload(SessionStats stats) => new()
-    {
-        ["today"] = new JsonObject
-        {
-            ["questions"] = stats.Questions,
-            ["tokens"] = stats.Tokens
-        }
-    };
+    private static JsonObject CreateLocalPayload(SessionStats stats) => UsagePayloadBuilder.CreateLocal(stats);
 
     private static TaskCompletionSource<JsonObject> Register(
         ConcurrentDictionary<int, TaskCompletionSource<JsonObject>> responses,
@@ -186,40 +221,142 @@ internal sealed class CodexUsageService
         return response["result"] as JsonObject
             ?? throw new InvalidOperationException($"未收到{name}数据。");
     }
+
+    private static IReadOnlyDictionary<string, string> GetThreadNames(JsonObject response)
+    {
+        var names = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (response["error"] is not null || response["result"]?["data"] is not JsonArray threads) return names;
+        foreach (var thread in threads.OfType<JsonObject>())
+        {
+            var name = thread["name"]?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(name)) continue;
+            foreach (var key in new[]
+                     {
+                         thread["id"]?.GetValue<string>(),
+                         thread["sessionId"]?.GetValue<string>()
+                     }.Where(key => !string.IsNullOrWhiteSpace(key)))
+            {
+                names.TryAdd(key!, name);
+            }
+        }
+        return names;
+    }
 }
 
 internal static class UsagePayloadBuilder
 {
-    public static JsonObject Build(
+    private const int HistoryDays = 7;
+
+    public static JsonObject CreateLocal(
         SessionStats stats,
-        JsonObject limits,
-        JsonObject usage,
-        DateTimeOffset now)
+        IReadOnlyDictionary<string, string>? threadNames = null)
     {
-        var payload = new JsonObject
+        return new JsonObject
         {
             ["today"] = new JsonObject
             {
                 ["questions"] = stats.Questions,
-                ["tokens"] = stats.Tokens
+                ["tokens"] = stats.Tokens,
+                ["tokenSource"] = "local",
+                ["conversations"] = new JsonArray(stats.Conversations.Select(conversation =>
+                    (JsonNode)CreateConversationPayload(conversation, threadNames)).ToArray())
+            },
+            ["history"] = new JsonObject
+            {
+                ["source"] = "local",
+                ["dailyTokens"] = new JsonArray(stats.DailyTokens.Select(day =>
+                    (JsonNode)new JsonObject
+                    {
+                        ["date"] = day.Date,
+                        ["tokens"] = day.Tokens
+                    }).ToArray())
             }
         };
+    }
+
+    private static JsonObject CreateConversationPayload(
+        ConversationStats conversation,
+        IReadOnlyDictionary<string, string>? threadNames)
+    {
+        var item = new JsonObject
+        {
+            ["turnId"] = conversation.TurnId,
+            ["threadId"] = conversation.ThreadId,
+            ["contextWindowId"] = conversation.ContextWindowId,
+            ["startedAt"] = conversation.StartedAt.ToString("O", CultureInfo.InvariantCulture),
+            ["preview"] = conversation.Preview,
+            ["tokens"] = conversation.Tokens is long tokens ? JsonValue.Create(tokens) : null
+        };
+        if (conversation.ThreadId is string threadId &&
+            threadNames?.TryGetValue(threadId, out var threadName) is true)
+        {
+            item["threadName"] = threadName;
+        }
+        return item;
+    }
+
+    public static JsonObject Build(
+        SessionStats stats,
+        JsonObject limits,
+        JsonObject usage,
+        DateTimeOffset now,
+        IReadOnlyDictionary<string, string>? threadNames = null)
+    {
+        var payload = CreateLocal(stats, threadNames);
 
         foreach (var property in limits)
         {
             payload[property.Key] = property.Value?.DeepClone();
         }
 
-        if (stats.Tokens == 0 &&
-            usage["dailyUsageBuckets"] is JsonArray buckets)
+        if (usage["dailyUsageBuckets"] is JsonArray buckets)
         {
-            var date = now.LocalDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-            var bucket = buckets
-                .OfType<JsonObject>()
-                .FirstOrDefault(item => item["startDate"]?.GetValue<string>() == date);
-            if (bucket?["tokens"] is JsonValue fallbackTokens && fallbackTokens.TryGetValue<long>(out var tokens))
+            var bucketValues = new Dictionary<string, long>(StringComparer.Ordinal);
+            foreach (var item in buckets.OfType<JsonObject>())
             {
-                ((JsonObject)payload["today"]!)["tokens"] = tokens;
+                var date = item["startDate"]?.GetValue<string>();
+                if (date is null) continue;
+                bucketValues[date] = item["tokens"] is JsonValue value && value.TryGetValue<long>(out var tokens)
+                    ? tokens
+                    : 0L;
+            }
+            var startDate = now.Date.AddDays(-(HistoryDays - 1));
+            var dates = Enumerable.Range(0, HistoryDays)
+                .Select(offset => startDate.AddDays(offset))
+                .ToArray();
+            var dateKeys = dates
+                .Select(date => date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
+                .ToArray();
+            if (dateKeys.Any(bucketValues.ContainsKey))
+            {
+                var localValues = stats.DailyTokens.ToDictionary(day => day.Date, day => day.Tokens);
+                var localFallback = false;
+                var accountDays = dateKeys
+                    .Select(dateKey =>
+                    {
+                        if (bucketValues.TryGetValue(dateKey, out var accountTokens))
+                        {
+                            return new DailyTokenStats(dateKey, accountTokens);
+                        }
+                        var localTokens = localValues.GetValueOrDefault(dateKey);
+                        if (localTokens > 0) localFallback = true;
+                        return new DailyTokenStats(dateKey, localTokens);
+                    })
+                    .ToArray();
+                payload["history"] = new JsonObject
+                {
+                    ["source"] = "account",
+                    ["localFallback"] = localFallback,
+                    ["dailyTokens"] = new JsonArray(accountDays.Select(day =>
+                        (JsonNode)new JsonObject
+                        {
+                            ["date"] = day.Date,
+                            ["tokens"] = day.Tokens
+                        }).ToArray())
+                };
+                var today = (JsonObject)payload["today"]!;
+                today["tokens"] = accountDays[^1].Tokens;
+                today["tokenSource"] = bucketValues.ContainsKey(dateKeys[^1]) ? "account" : "local";
             }
         }
 

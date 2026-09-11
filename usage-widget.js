@@ -16,6 +16,9 @@ const DEFAULT_DATA = {
   resetCredits: null,
   todayTokens: null,
   todayQuestions: null,
+  tokenSource: "local",
+  conversations: [],
+  history: { source: "local", dailyTokens: [] },
   plan: "同步中",
   updatedAt: Date.now(),
   syncMessage: "正在连接 Codex",
@@ -49,6 +52,17 @@ const hostBridge = {
   beginDrag(payload) {
     window.codexMeterBridge?.beginDrag?.(payload);
   },
+  consumeReset() {
+    if (window.codexMeterBridge?.consumeReset) {
+      window.codexMeterBridge.consumeReset({ confirmed: true });
+      return true;
+    }
+    if (window.webkit?.messageHandlers?.panel) {
+      window.webkit.messageHandlers.panel.postMessage({ action: "consumeReset", confirmed: true });
+      return true;
+    }
+    return false;
+  },
 };
 
 class CodexUsageWidget extends HTMLElement {
@@ -68,6 +82,10 @@ class CodexUsageWidget extends HTMLElement {
     this.dragging = false;
     this.suppressHoverUntilLeave = false;
     this.suppressHoverTimer = null;
+    this.activeDialog = null;
+    this.expandedConversationGroups = new Set();
+    this.pointerInside = false;
+    this.resetting = false;
   }
 
   connectedCallback() {
@@ -106,6 +124,9 @@ class CodexUsageWidget extends HTMLElement {
       this.syncState = "loading";
       this.data.todayTokens = localStats.tokens ?? this.data.todayTokens;
       this.data.todayQuestions = localStats.questions ?? this.data.todayQuestions;
+      this.data.tokenSource = localStats.tokenSource || this.data.tokenSource;
+      if (Array.isArray(localStats.conversations)) this.data.conversations = localStats.conversations;
+      if (payload.history?.dailyTokens) this.data.history = payload.history;
       this.data.syncMessage = payload.syncMessage || "正在同步额度";
       this.data.updatedAt = Date.now();
       this.renderValues();
@@ -117,6 +138,9 @@ class CodexUsageWidget extends HTMLElement {
       const localStats = payload.today || {};
       this.data.todayTokens = localStats.tokens ?? this.data.todayTokens;
       this.data.todayQuestions = localStats.questions ?? this.data.todayQuestions;
+      this.data.tokenSource = localStats.tokenSource || this.data.tokenSource;
+      if (Array.isArray(localStats.conversations)) this.data.conversations = localStats.conversations;
+      if (payload.history?.dailyTokens) this.data.history = payload.history;
       if (this.data.primary.remainingPercent == null) this.data.plan = "重试中";
       this.data.syncMessage = payload.error;
       this.data.updatedAt = Date.now();
@@ -149,6 +173,9 @@ class CodexUsageWidget extends HTMLElement {
       resetCredits: payload.rateLimitResetCredits?.availableCount ?? payload.resetCredits ?? null,
       todayTokens: localStats.tokens ?? payload.todayTokens ?? null,
       todayQuestions: localStats.questions ?? payload.todayQuestions ?? null,
+      tokenSource: localStats.tokenSource || payload.history?.source || "local",
+      conversations: Array.isArray(localStats.conversations) ? localStats.conversations : this.data.conversations,
+      history: payload.history?.dailyTokens ? payload.history : this.data.history,
       plan: (limits.planType || payload.plan || "已连接").replace(/^./, (char) => char.toUpperCase()),
       updatedAt: Date.now(),
       syncMessage: payload.error || "实时数据",
@@ -157,7 +184,7 @@ class CodexUsageWidget extends HTMLElement {
   }
 
   recordTurn({ inputTokens = 0, outputTokens = 0 } = {}) {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = this.localDateKey();
     const stats = this.readTodayStats();
     const next = {
       date: today,
@@ -167,11 +194,16 @@ class CodexUsageWidget extends HTMLElement {
     localStorage.setItem("codex-widget-daily", JSON.stringify(next));
     this.data.todayTokens = next.tokens;
     this.data.todayQuestions = next.questions;
+    this.data.tokenSource = "local";
+    if (this.data.history?.dailyTokens?.length) {
+      const days = this.data.history.dailyTokens.map((day) => day.date === today ? { ...day, tokens: next.tokens } : day);
+      this.data.history = { source: "local", dailyTokens: days };
+    }
     this.renderValues();
   }
 
   readTodayStats() {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = this.localDateKey();
     try {
       const saved = JSON.parse(localStorage.getItem("codex-widget-daily"));
       return saved?.date === today ? saved : { date: today, tokens: 0, questions: 0 };
@@ -183,6 +215,13 @@ class CodexUsageWidget extends HTMLElement {
   formatNumber(value) {
     if (value == null) return "—";
     return new Intl.NumberFormat("zh-CN", { notation: value >= 10000 ? "compact" : "standard", maximumFractionDigits: 1 }).format(value);
+  }
+
+  localDateKey(date = new Date()) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
   }
 
   formatPercent(value) {
@@ -197,6 +236,15 @@ class CodexUsageWidget extends HTMLElement {
     const minutes = Math.max(1, Math.floor((remaining % 3600000) / 60000));
     if (hours >= 24) return `${Math.floor(hours / 24)} 天 ${hours % 24} 小时后刷新`;
     return `${hours} 小时 ${minutes} 分后刷新`;
+  }
+
+  escapeHTML(value) {
+    return String(value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
   }
 
   cycleTheme() {
@@ -220,6 +268,15 @@ class CodexUsageWidget extends HTMLElement {
       if (action === "theme") this.cycleTheme();
       if (action === "refresh") this.refresh();
       if (action === "close") hostBridge.quit();
+      if (action === "reset-credit") this.openResetDialog();
+      if (action === "tokens-detail") this.openDialog("tokens");
+      if (action === "conversations-detail") this.openDialog("conversations");
+      if (action === "toggle-conversation-group") {
+        const groupKey = event.target.closest("[data-group-key]")?.dataset.groupKey;
+        if (groupKey) this.toggleConversationGroup(groupKey);
+      }
+      if (action === "close-dialog" || action === "cancel-reset") this.closeDialog();
+      if (action === "confirm-reset") this.confirmReset();
       if (action === "collapse") {
         this.collapsed = !this.collapsed;
         localStorage.setItem("codex-widget-collapsed", String(this.collapsed));
@@ -236,6 +293,224 @@ class CodexUsageWidget extends HTMLElement {
         }
       }
     });
+    this.shadowRoot.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && this.activeDialog && !this.resetting) {
+        event.preventDefault();
+        this.closeDialog();
+      }
+    });
+  }
+
+  openResetDialog() {
+    if (this.resetting || !(this.data.resetCredits > 0)) return;
+    this.openDialog("reset", "[data-action='cancel-reset']");
+  }
+
+  openDialog(kind, focusSelector = "[data-action='close-dialog']") {
+    clearTimeout(this.hoverCloseTimer);
+    clearTimeout(this.collapseResizeTimer);
+    this.activeDialog = kind;
+    this.shadowRoot.querySelectorAll(".app-dialog").forEach((dialog) => dialog.setAttribute("hidden", ""));
+    if (kind === "tokens") this.renderTokenHistory();
+    if (kind === "conversations") {
+      this.expandedConversationGroups.clear();
+      this.renderConversations();
+    }
+    const dialog = this.shadowRoot.querySelector(`[data-dialog='${kind}']`);
+    dialog?.removeAttribute("hidden");
+    requestAnimationFrame(() => dialog?.querySelector(focusSelector)?.focus());
+  }
+
+  closeDialog() {
+    if (this.resetting && this.activeDialog === "reset") return;
+    if (this.activeDialog === "conversations") {
+      this.expandedConversationGroups.clear();
+    }
+    this.activeDialog = null;
+    this.shadowRoot.querySelectorAll(".app-dialog").forEach((dialog) => dialog.setAttribute("hidden", ""));
+    if (this.autoHover && !this.pointerInside) this.scheduleHoverCollapse();
+  }
+
+  confirmReset() {
+    if (this.resetting || this.activeDialog !== "reset") return;
+    this.resetting = true;
+    this.renderResetState();
+    if (!hostBridge.consumeReset()) {
+      this.handleResetResult({ error: "当前宿主不支持额度重置" });
+    }
+  }
+
+  handleResetResult(payload = {}) {
+    this.resetting = false;
+    this.activeDialog = null;
+    const messages = {
+      reset: "额度重置成功",
+      nothingToReset: "当前额度无需重置，次数未消耗",
+      noCredit: "没有可用的重置次数",
+      alreadyRedeemed: "该次重置已经生效",
+    };
+    if (payload.outcome === "noCredit") this.data.resetCredits = 0;
+    this.syncState = payload.error ? "error" : "success";
+    this.data.syncMessage = payload.error || messages[payload.outcome] || "重置请求已完成";
+    this.data.updatedAt = Date.now();
+    this.shadowRoot.querySelector("[data-dialog='reset']")?.setAttribute("hidden", "");
+    this.renderValues();
+    if (this.autoHover && !this.pointerInside) this.scheduleHoverCollapse();
+  }
+
+  renderTokenHistory() {
+    const chart = this.shadowRoot.querySelector(".token-chart");
+    if (!chart) return;
+    const days = Array.isArray(this.data.history?.dailyTokens) ? this.data.history.dailyTokens.slice(-7) : [];
+    if (!days.length) {
+      chart.innerHTML = '<div class="dialog-empty">暂无历史用量数据</div>';
+      return;
+    }
+    const maximum = Math.max(1, ...days.map((day) => Math.max(0, Number(day.tokens) || 0)));
+    const today = this.localDateKey();
+    chart.innerHTML = days.map((day) => {
+      const tokens = Math.max(0, Number(day.tokens) || 0);
+      const height = tokens === 0 ? 0 : Math.max(5, Math.round(tokens / maximum * 100));
+      const date = new Date(`${day.date}T00:00:00`);
+      const label = Number.isNaN(date.getTime())
+        ? day.date
+        : new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
+      return `<div class="chart-column ${day.date === today ? "is-today" : ""}">
+        <span class="chart-value">${this.escapeHTML(this.formatNumber(tokens))}</span>
+        <span class="chart-track"><i style="height:${height}%"></i></span>
+        <span class="chart-label">${this.escapeHTML(label)}</span>
+      </div>`;
+    }).join("");
+  }
+
+  renderConversations() {
+    const list = this.shadowRoot.querySelector(".conversation-list");
+    const summary = this.shadowRoot.querySelector(".conversation-summary");
+    if (!list || !summary) return;
+    const conversations = Array.isArray(this.data.conversations) ? this.data.conversations : [];
+    const groups = this.groupConversations(conversations);
+    summary.textContent = `本机记录 · ${groups.length} 个上下文 · ${conversations.length} 轮`;
+    if (!conversations.length) {
+      list.innerHTML = '<div class="dialog-empty">今天还没有可显示的对话</div>';
+      return;
+    }
+    list.innerHTML = groups.map((group, groupIndex) => {
+      const expanded = this.expandedConversationGroups.has(group.key);
+      const groupId = `conversation-group-${groupIndex}`;
+      const firstTime = this.formatConversationTime(group.turns[0]?.startedAt);
+      const lastTime = this.formatConversationTime(group.turns.at(-1)?.startedAt);
+      const timeRange = firstTime === lastTime || lastTime === "—" ? firstTime : `${firstTime}–${lastTime}`;
+      const allTokensKnown = group.turns.every((conversation) =>
+        conversation.tokens != null && Number.isFinite(Number(conversation.tokens)));
+      const totalTokens = allTokensKnown
+        ? group.turns.reduce((total, conversation) => total + Math.max(0, Number(conversation.tokens)), 0)
+        : null;
+      const groupTokenBadge = totalTokens == null
+        ? ""
+        : `<span class="conversation-group-tokens">${this.escapeHTML(this.formatNumber(totalTokens))} Tokens</span>`;
+      const rows = group.turns.map((conversation) => {
+        const tokenBadge = conversation.tokens == null
+          ? ""
+          : `<span class="conversation-tokens">${this.escapeHTML(this.formatNumber(conversation.tokens))} Tokens</span>`;
+        return `<div class="conversation-row">
+          <span class="conversation-time">${this.escapeHTML(this.formatConversationTime(conversation.startedAt))}</span>
+          <span class="conversation-preview">${this.escapeHTML(conversation.preview || "未命名对话")}</span>
+          ${tokenBadge}
+        </div>`;
+      }).join("");
+      return `<section class="conversation-group ${expanded ? "is-expanded" : ""}">
+        <button class="conversation-group-toggle" data-action="toggle-conversation-group" data-group-key="${this.escapeHTML(group.key)}" type="button" aria-expanded="${expanded}" aria-controls="${groupId}">
+          <span class="conversation-group-copy">
+            <span class="conversation-group-title" title="${this.escapeHTML(group.title)}">${this.escapeHTML(group.title)}</span>
+            <span class="conversation-group-meta"><span>${this.escapeHTML(timeRange)}</span><span>${group.turns.length} 轮</span>${groupTokenBadge}</span>
+          </span>
+          <span class="conversation-group-chevron">${ICONS.chevron}</span>
+        </button>
+        <div class="conversation-group-turns" id="${groupId}"${expanded ? "" : " hidden"}>${rows}</div>
+      </section>`;
+    }).join("");
+  }
+
+  groupConversations(conversations) {
+    const groupsByKey = new Map();
+    conversations.forEach((conversation, index) => {
+      const contextWindowId = String(conversation.contextWindowId || "").trim();
+      const threadId = String(conversation.threadId || "").trim();
+      const turnId = String(conversation.turnId || "").trim();
+      const key = contextWindowId
+        ? `context:${contextWindowId}`
+        : threadId
+          ? `thread:${threadId}`
+          : `turn:${turnId || `${conversation.startedAt || "unknown"}:${index}`}`;
+      if (!groupsByKey.has(key)) groupsByKey.set(key, { key, insertionIndex: index, turns: [] });
+      groupsByKey.get(key).turns.push({ ...conversation, insertionIndex: index });
+    });
+
+    return [...groupsByKey.values()].map((group) => {
+      group.turns.sort((left, right) => {
+        const leftTime = Date.parse(left.startedAt);
+        const rightTime = Date.parse(right.startedAt);
+        if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) return leftTime - rightTime;
+        if (Number.isFinite(leftTime) !== Number.isFinite(rightTime)) return Number.isFinite(leftTime) ? -1 : 1;
+        return left.insertionIndex - right.insertionIndex;
+      });
+      const validTimes = group.turns
+        .map((conversation) => Date.parse(conversation.startedAt))
+        .filter(Number.isFinite);
+      return {
+        ...group,
+        title: group.turns.find((conversation) => String(conversation.threadName || "").trim())?.threadName
+          || group.turns[0]?.preview
+          || "未命名对话",
+        latestAt: validTimes.length ? Math.max(...validTimes) : Number.NEGATIVE_INFINITY,
+      };
+    }).sort((left, right) => right.latestAt - left.latestAt || left.insertionIndex - right.insertionIndex);
+  }
+
+  formatConversationTime(value) {
+    const startedAt = new Date(value);
+    return Number.isNaN(startedAt.getTime())
+      ? "—"
+      : new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(startedAt);
+  }
+
+  toggleConversationGroup(groupKey) {
+    const restoreFocus = this.shadowRoot.activeElement?.dataset.groupKey === groupKey;
+    if (this.expandedConversationGroups.has(groupKey)) {
+      this.expandedConversationGroups.delete(groupKey);
+    } else {
+      this.expandedConversationGroups.add(groupKey);
+    }
+    this.renderConversations();
+    if (restoreFocus) {
+      requestAnimationFrame(() => {
+        const button = [...this.shadowRoot.querySelectorAll("[data-group-key]")]
+          .find((item) => item.dataset.groupKey === groupKey);
+        button?.focus();
+      });
+    }
+  }
+
+  renderResetState() {
+    const available = this.data.resetCredits > 0;
+    const resetButton = this.shadowRoot.querySelector("[data-action='reset-credit']");
+    if (resetButton) {
+      resetButton.disabled = !available || this.resetting;
+      if (available) {
+        resetButton.removeAttribute("title");
+      } else {
+        resetButton.title = "没有可用的重置次数";
+      }
+    }
+    const resetLabel = this.shadowRoot.querySelector(".reset-label");
+    if (resetLabel) resetLabel.textContent = "重置次数";
+    const confirmButton = this.shadowRoot.querySelector("[data-action='confirm-reset']");
+    const cancelButton = this.shadowRoot.querySelector("[data-action='cancel-reset']");
+    if (confirmButton) {
+      confirmButton.disabled = this.resetting;
+      confirmButton.textContent = this.resetting ? "正在重置…" : "确认使用";
+    }
+    if (cancelButton) cancelButton.disabled = this.resetting;
   }
 
   bindHoverExpansion() {
@@ -251,6 +526,7 @@ class CodexUsageWidget extends HTMLElement {
     };
 
     const enter = (pointer) => {
+      this.pointerInside = true;
       if (this.dragging) return;
       if (this.suppressHoverUntilLeave) return;
       clearTimeout(this.hoverCloseTimer);
@@ -271,21 +547,15 @@ class CodexUsageWidget extends HTMLElement {
     };
 
     const leave = () => {
+      this.pointerInside = false;
       if (this.suppressHoverUntilLeave) {
         this.suppressHoverUntilLeave = false;
         clearTimeout(this.suppressHoverTimer);
         return;
       }
       if (this.dragging) return;
-      clearTimeout(this.hoverCloseTimer);
-      this.hoverCloseTimer = setTimeout(() => {
-        if (this.collapsed || this.dragging) return;
-        this.collapsed = true;
-        this.shadowRoot.querySelector(".widget")?.classList.add("collapsed");
-        this.collapseResizeTimer = setTimeout(() => {
-          if (this.collapsed) this.syncNativeSize(false);
-        }, 280);
-      }, 120);
+      if (this.activeDialog || this.resetting) return;
+      this.scheduleHoverCollapse();
     };
 
     window.codexUsageHoverEnter = enter;
@@ -339,6 +609,18 @@ class CodexUsageWidget extends HTMLElement {
     };
     window.addEventListener("pointerup", cancelPendingDrag);
     window.addEventListener("pointercancel", cancelPendingDrag);
+  }
+
+  scheduleHoverCollapse() {
+    clearTimeout(this.hoverCloseTimer);
+    this.hoverCloseTimer = setTimeout(() => {
+      if (this.collapsed || this.dragging || this.activeDialog || this.pointerInside) return;
+      this.collapsed = true;
+      this.shadowRoot.querySelector(".widget")?.classList.add("collapsed");
+      this.collapseResizeTimer = setTimeout(() => {
+        if (this.collapsed) this.syncNativeSize(false);
+      }, 280);
+    }, 120);
   }
 
   animateQuotaFill() {
@@ -441,6 +723,9 @@ class CodexUsageWidget extends HTMLElement {
     const updated = this.shadowRoot.querySelector(".updated");
     updated.textContent = `${this.data.syncMessage} · ${new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(this.data.updatedAt)}`;
     updated.title = this.data.syncMessage;
+    this.renderResetState();
+    if (this.activeDialog === "tokens") this.renderTokenHistory();
+    if (this.activeDialog === "conversations") this.renderConversations();
     this.applySyncState();
     requestAnimationFrame(() => this.syncNativeSize(false));
   }
@@ -487,12 +772,41 @@ class CodexUsageWidget extends HTMLElement {
           </div>
 
           <div class="stats">
-            <article><span class="stat-icon violet">${ICONS.reset}</span><span class="stat-value reset-count">${this.formatNumber(this.data.resetCredits)}</span><span class="stat-label">重置次数</span></article>
-            <article><span class="stat-icon cyan">${ICONS.token}</span><span class="stat-value token-count">${this.formatNumber(this.data.todayTokens)}</span><span class="stat-label">今日 Tokens</span></article>
-            <article><span class="stat-icon coral">${ICONS.message}</span><span class="stat-value question-count">${this.data.todayQuestions}</span><span class="stat-label">今日对话</span></article>
+            <button class="stat reset-stat" data-action="reset-credit" type="button" aria-describedby="reset-stat-tooltip" disabled><span class="stat-icon violet">${ICONS.reset}</span><span class="stat-value reset-count">${this.formatNumber(this.data.resetCredits)}</span><span class="stat-label reset-label">重置次数</span><span class="stat-tooltip" id="reset-stat-tooltip" role="tooltip">使用一次重置额度</span></button>
+            <button class="stat detail-stat" data-action="tokens-detail" type="button" aria-haspopup="dialog" aria-describedby="tokens-stat-tooltip"><span class="stat-icon cyan">${ICONS.token}</span><span class="stat-value token-count">${this.formatNumber(this.data.todayTokens)}</span><span class="stat-label">今日 Tokens</span><span class="stat-tooltip" id="tokens-stat-tooltip" role="tooltip">最近7天Tokens</span></button>
+            <button class="stat detail-stat" data-action="conversations-detail" type="button" aria-haspopup="dialog" aria-describedby="conversations-stat-tooltip"><span class="stat-icon coral">${ICONS.message}</span><span class="stat-value question-count">${this.data.todayQuestions}</span><span class="stat-label">今日对话</span><span class="stat-tooltip" id="conversations-stat-tooltip" role="tooltip">详情</span></button>
           </div>
 
           <footer><span class="status-dot"></span><span class="updated">刚刚更新</span><span class="theme-label">跟随系统</span></footer>
+        </div>
+        <div class="app-dialog" data-dialog="reset" role="dialog" aria-modal="true" aria-labelledby="reset-dialog-title" hidden>
+          <div class="dialog-card reset-dialog-card">
+            <span class="reset-dialog-icon">${ICONS.reset}</span>
+            <strong id="reset-dialog-title">使用一次额度重置？</strong>
+            <p>确认后会立即消耗一次珍贵的重置机会，并刷新当前可重置的额度周期。此操作不能撤销。</p>
+            <div class="reset-dialog-actions">
+              <button data-action="cancel-reset" type="button">取消</button>
+              <button class="reset-confirm" data-action="confirm-reset" type="button">确认使用</button>
+            </div>
+          </div>
+        </div>
+        <div class="app-dialog" data-dialog="tokens" role="dialog" aria-modal="true" aria-labelledby="token-dialog-title" hidden>
+          <div class="dialog-card token-dialog-card">
+            <div class="dialog-heading">
+              <div><strong id="token-dialog-title">最近 7 天 Tokens</strong></div>
+              <button class="dialog-dismiss" data-action="close-dialog" type="button" aria-label="关闭用量图表">${ICONS.close}</button>
+            </div>
+            <div class="token-chart"></div>
+          </div>
+        </div>
+        <div class="app-dialog" data-dialog="conversations" role="dialog" aria-modal="true" aria-labelledby="conversation-dialog-title" hidden>
+          <div class="dialog-card conversation-dialog-card">
+            <div class="dialog-heading">
+              <div><strong id="conversation-dialog-title">今日对话</strong><span class="dialog-subtitle conversation-summary">本机记录</span></div>
+              <button class="dialog-dismiss" data-action="close-dialog" type="button" aria-label="关闭对话列表">${ICONS.close}</button>
+            </div>
+            <div class="conversation-list"></div>
+          </div>
         </div>
       </section>
     `;
@@ -501,11 +815,11 @@ class CodexUsageWidget extends HTMLElement {
 
   get styles() {
     return `
-      :host { --bg:rgba(250,252,255,.86); --panel:rgba(255,255,255,.68); --text:#172033; --muted:#7b8495; --line:rgba(43,55,78,.09); --shadow:0 24px 70px rgba(25,36,62,.18),0 3px 12px rgba(25,36,62,.08); position:fixed; top:24px; right:24px; z-index:2147483647; color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,sans-serif; font-synthesis:none; }
+      :host { --bg:rgba(250,252,255,.86); --panel:rgba(255,255,255,.68); --text:#172033; --muted:#7b8495; --line:rgba(43,55,78,.09); --shadow:0 24px 70px rgba(25,36,62,.18),0 3px 12px rgba(25,36,62,.08); position:fixed; top:24px; right:24px; z-index:2147483647; color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,sans-serif; font-synthesis:none; user-select:none; -webkit-user-select:none; }
       :host([data-theme="dark"]) { --bg:rgba(24,27,34,.88); --panel:rgba(255,255,255,.055); --text:#f4f6fb; --muted:#969eae; --line:rgba(255,255,255,.085); --shadow:0 28px 80px rgba(0,0,0,.42),0 2px 8px rgba(0,0,0,.25); }
       @media (prefers-color-scheme:dark) { :host([data-theme="auto"]) { --bg:rgba(24,27,34,.88); --panel:rgba(255,255,255,.055); --text:#f4f6fb; --muted:#969eae; --line:rgba(255,255,255,.085); --shadow:0 28px 80px rgba(0,0,0,.42),0 2px 8px rgba(0,0,0,.25); } }
       * { box-sizing:border-box; }
-      .widget { width:min(360px,calc(100vw - 32px)); border:1px solid var(--line); border-radius:24px; overflow:hidden; background:var(--bg); box-shadow:var(--shadow); backdrop-filter:blur(28px) saturate(1.35); -webkit-backdrop-filter:blur(28px) saturate(1.35); transition:width .3s cubic-bezier(.2,.8,.2,1),background .2s; }
+      .widget { position:relative; width:min(360px,calc(100vw - 32px)); border:1px solid var(--line); border-radius:24px; overflow:hidden; background:var(--bg); box-shadow:var(--shadow); backdrop-filter:blur(28px) saturate(1.35); -webkit-backdrop-filter:blur(28px) saturate(1.35); transition:width .3s cubic-bezier(.2,.8,.2,1),background .2s; }
       :host([native]) { width:100vw; }
       :host([native]) .widget { --compact-x:0px; --compact-y:0px; --expand-x:33px; --expand-y:33px; width:360px; border:0; box-shadow:none; clip-path:inset(0 0 0 0 round 24px); will-change:clip-path; transition:clip-path .28s cubic-bezier(.2,.8,.2,1),background .2s; }
       :host([native]) .widget.dragging,
@@ -570,7 +884,15 @@ class CodexUsageWidget extends HTMLElement {
       .progress { height:6px; overflow:hidden; margin-bottom:8px; border-radius:9px; background:rgba(120,126,147,.13); }
       .progress i { display:block; height:100%; border-radius:inherit; background:linear-gradient(90deg,var(--quota-start),var(--quota-end)); box-shadow:0 0 10px var(--quota-glow); transition:width .3s ease,background .35s ease,box-shadow .35s ease; }
       .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
-      article { min-width:0; padding:12px 9px 11px; border:1px solid var(--line); border-radius:15px; background:var(--panel); }
+      .stat { position:relative; width:auto; height:auto; min-width:0; display:block; overflow:visible; padding:12px 9px 11px; border:1px solid var(--line); border-radius:15px; color:var(--text); background:var(--panel); text-align:left; }
+      .detail-stat:hover,.detail-stat:focus-visible { border-color:rgba(21,154,188,.28); background:rgba(21,154,188,.075); transform:translateY(-1px); }
+      .reset-stat:not(:disabled):hover { border-color:rgba(116,105,234,.28); background:rgba(116,105,234,.09); transform:translateY(-1px); }
+      .reset-stat:disabled { cursor:default; opacity:.72; }
+      .stat-tooltip { position:absolute; left:50%; bottom:calc(100% + 8px); z-index:5; visibility:hidden; padding:6px 9px; border:1px solid var(--line); border-radius:8px; color:var(--text); background:var(--bg); box-shadow:0 8px 24px rgba(25,30,48,.18); font-size:10px; font-weight:600; line-height:1; white-space:nowrap; pointer-events:none; opacity:0; transform:translate(-50%,0); }
+      .detail-stat:hover .stat-tooltip,
+      .detail-stat:focus-visible .stat-tooltip,
+      .reset-stat:not(:disabled):hover .stat-tooltip,
+      .reset-stat:not(:disabled):focus-visible .stat-tooltip { visibility:visible; opacity:1; }
       .stat-icon { width:25px; height:25px; display:grid; place-items:center; margin-bottom:10px; border-radius:8px; }
       .stat-icon svg { width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
       .violet { color:#7469ea; background:rgba(116,105,234,.12); }.cyan { color:#159abc; background:rgba(21,154,188,.11); }.coral { color:#e76876; background:rgba(231,104,118,.11); }
@@ -582,6 +904,53 @@ class CodexUsageWidget extends HTMLElement {
       .sync-loading .status-dot { background:#e6a23c; box-shadow:0 0 0 3px rgba(230,162,60,.12); }
       .sync-error .status-dot { background:#ee5c67; box-shadow:0 0 0 3px rgba(238,92,103,.12); }
       .theme-label { flex:0 0 auto; margin-left:auto; }
+      .app-dialog[hidden] { display:none; }
+      .app-dialog { position:absolute; inset:0; z-index:20; display:grid; min-width:0; min-height:0; place-items:center; overflow:hidden; padding:14px; background:rgba(31,35,48,.28); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); }
+      .dialog-card { width:100%; max-width:100%; max-height:100%; min-width:0; min-height:0; display:flex; flex-direction:column; overflow:hidden; padding:18px; border:1px solid var(--line); border-radius:19px; color:var(--text); background:var(--bg); box-shadow:0 18px 54px rgba(25,30,48,.24); }
+      .reset-dialog-card { padding:22px; }
+      .reset-dialog-icon { width:34px; height:34px; display:grid; place-items:center; margin-bottom:14px; border-radius:10px; color:#7469ea; background:rgba(116,105,234,.13); }
+      .reset-dialog-icon svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+      .reset-dialog-card strong { display:block; font-size:16px; letter-spacing:-.02em; }
+      .reset-dialog-card p { margin:9px 0 18px; color:var(--muted); font-size:11px; line-height:1.65; }
+      .reset-dialog-actions { display:flex; justify-content:flex-end; gap:8px; }
+      .reset-dialog-actions button { width:auto; min-width:72px; height:34px; padding:0 13px; border:1px solid var(--line); font-size:11px; font-weight:650; }
+      .reset-dialog-actions .reset-confirm { color:white; border-color:transparent; background:linear-gradient(135deg,#6559df,#8278ef); }
+      .reset-dialog-actions .reset-confirm:hover { color:white; background:linear-gradient(135deg,#594dcc,#7469e5); }
+      .reset-dialog-actions button:disabled { cursor:wait; opacity:.65; }
+      .dialog-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex:0 0 auto; }
+      .dialog-heading>div { min-width:0; display:flex; flex-direction:column; }
+      .dialog-heading strong { font-size:16px; letter-spacing:-.025em; }
+      .dialog-subtitle { margin-top:4px; color:var(--muted); font-size:10px; }
+      .dialog-dismiss { flex:0 0 auto; margin:-5px -5px 0 0; }
+      .token-chart { height:260px; min-height:0; display:flex; align-items:stretch; justify-content:space-between; gap:5px; margin-top:19px; padding-top:18px; }
+      .chart-column { min-width:0; flex:1 1 0; display:grid; grid-template-rows:18px minmax(0,1fr) 18px; align-items:end; text-align:center; }
+      .chart-value { overflow:hidden; color:var(--muted); font-size:8px; font-weight:650; text-overflow:ellipsis; white-space:nowrap; }
+      .chart-track { position:relative; height:100%; min-height:80px; display:flex; align-items:flex-end; justify-content:center; overflow:hidden; border-radius:7px 7px 4px 4px; background:rgba(120,126,147,.08); }
+      .chart-track i { width:70%; min-height:0; display:block; border-radius:6px 6px 3px 3px; background:linear-gradient(180deg,#31b6d1,#159abc); box-shadow:0 4px 12px rgba(21,154,188,.2); transition:height .35s cubic-bezier(.2,.8,.2,1); }
+      .chart-column.is-today .chart-track { background:rgba(116,105,234,.1); }
+      .chart-column.is-today .chart-track i { background:linear-gradient(180deg,#8a87f4,#6960e8); box-shadow:0 4px 12px rgba(105,96,232,.25); }
+      .chart-label { align-self:end; overflow:hidden; color:var(--muted); font-size:8px; white-space:nowrap; }
+      .chart-column.is-today .chart-label { color:#7469ea; font-weight:750; }
+      .conversation-dialog-card { padding-bottom:12px; }
+      .conversation-list { min-height:0; display:flex; flex-direction:column; gap:8px; overflow-x:hidden; overflow-y:auto; margin:14px -7px 0; padding:0 7px 6px; overscroll-behavior:contain; scrollbar-width:thin; }
+      .conversation-group { flex:0 0 auto; overflow:hidden; border:1px solid var(--line); border-radius:13px; background:rgba(120,126,147,.035); }
+      .conversation-group-toggle { width:100%; height:auto; min-height:54px; display:grid; grid-template-columns:minmax(0,1fr) 20px; align-items:center; justify-items:stretch; gap:8px; padding:10px 10px 9px 12px; border-radius:0; color:var(--text); text-align:left; }
+      .conversation-group-toggle:hover,.conversation-group-toggle:focus-visible { background:var(--panel); }
+      .conversation-group-copy { min-width:0; width:100%; display:grid; grid-template-rows:14px 12px; justify-items:stretch; gap:5px; }
+      .conversation-group-title { width:100%; overflow:hidden; font-size:10px; font-weight:700; line-height:14px; text-align:left; text-overflow:ellipsis; white-space:nowrap; }
+      .conversation-group-meta { width:100%; display:grid; grid-template-columns:72px 34px minmax(0,1fr); align-items:center; gap:7px; color:var(--muted); font-size:8px; font-variant-numeric:tabular-nums; text-align:left; }
+      .conversation-group-tokens { color:#159abc; font-weight:700; text-align:right; white-space:nowrap; }
+      .conversation-group-chevron { display:grid; place-items:center; color:var(--muted); transition:transform .18s ease; }
+      .conversation-group-chevron svg { width:14px; height:14px; }
+      .conversation-group.is-expanded .conversation-group-chevron { transform:rotate(180deg); }
+      .conversation-group-turns[hidden] { display:none; }
+      .conversation-group-turns { border-top:1px solid var(--line); }
+      .conversation-row { display:grid; grid-template-columns:38px minmax(0,1fr) auto; align-items:start; gap:8px; padding:10px 8px; border-bottom:1px solid var(--line); }
+      .conversation-row:last-child { border-bottom:0; }
+      .conversation-time { padding-top:1px; color:var(--muted); font-size:9px; font-variant-numeric:tabular-nums; }
+      .conversation-preview { min-width:0; display:-webkit-box; overflow:hidden; font-size:10px; font-weight:580; line-height:1.45; overflow-wrap:anywhere; -webkit-box-orient:vertical; -webkit-line-clamp:2; }
+      .conversation-tokens { align-self:start; padding:3px 5px; border-radius:6px; color:#159abc; background:rgba(21,154,188,.1); font-size:8px; font-weight:700; white-space:nowrap; }
+      .dialog-empty { width:100%; height:100%; display:grid; place-items:center; color:var(--muted); font-size:11px; text-align:center; }
       .loading [data-action="refresh"] svg { animation:spin .8s linear infinite; }
       @keyframes spin { to { transform:rotate(360deg); } }
       @keyframes liquid-flow { from { transform:translateX(0); } to { transform:translateX(-30px); } }
@@ -600,5 +969,6 @@ customElements.define("codex-usage-widget", CodexUsageWidget);
 
 // Host integration helpers:
 window.updateCodexUsage = (payload) => document.querySelector("codex-usage-widget")?.updateUsage(payload);
+window.codexResetResult = (payload) => document.querySelector("codex-usage-widget")?.handleResetResult(payload);
 window.recordCodexTurn = (usage) => document.querySelector("codex-usage-widget")?.recordTurn(usage);
 window.codexUsageSetPanelAnchor = (payload) => document.querySelector("codex-usage-widget")?.setPanelAnchor(payload);

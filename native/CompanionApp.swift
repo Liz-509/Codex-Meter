@@ -3,7 +3,7 @@ import WebKit
 
 final class FloatingPanel: NSPanel {
     override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
+    override var canBecomeMain: Bool { false }
 }
 
 final class HoverWebView: WKWebView {
@@ -126,6 +126,7 @@ final class NativeDragHandle: NSView {
 final class PanelBridge: NSObject, WKScriptMessageHandler {
     weak var panel: NSPanel?
     var onUsageRequested: (() -> Void)?
+    var onResetRequested: (() -> Void)?
     private var compactFrame: NSRect?
 
     func prepareForDrag() {
@@ -162,6 +163,12 @@ final class PanelBridge: NSObject, WKScriptMessageHandler {
 
         if body["action"] as? String == "getUsage" {
             onUsageRequested?()
+            return
+        }
+
+        if body["action"] as? String == "consumeReset",
+           body["confirmed"] as? Bool == true {
+            onResetRequested?()
             return
         }
 
@@ -243,6 +250,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private weak var webView: WKWebView?
     private let usageService = CodexUsageService()
     private var isRefreshing = false
+    private var isResetting = false
+    private var refreshAfterReset = false
     private var refreshTimer: Timer?
     private var retryAttempt = 0
     private var retryWorkItem: DispatchWorkItem?
@@ -250,6 +259,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        ProcessInfo.processInfo.disableSuddenTermination()
+        ProcessInfo.processInfo.disableAutomaticTermination(
+            "Codex Meter stays visible until the user explicitly quits"
+        )
         if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
            let icon = NSImage(contentsOf: iconURL) {
             NSApp.applicationIconImage = icon
@@ -258,7 +271,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.refreshUsage()
         }
-        NSApp.activate(ignoringOtherApps: true)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -276,7 +288,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let panel = FloatingPanel(
             contentRect: NSRect(origin: origin, size: compactSize),
-            styleMask: [.borderless],
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -288,6 +300,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.acceptsMouseMovedEvents = true
         panel.isMovableByWindowBackground = true
         panel.hidesOnDeactivate = false
+        // The panel stays non-activating, but must become key on hover so WKWebView
+        // controls accept the first click when the pointer arrives from another app.
+        panel.becomesKeyOnlyIfNeeded = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.delegate = self
 
@@ -298,6 +313,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
           getUsage() {
             window.webkit.messageHandlers.panel.postMessage({ action: 'getUsage' });
             return null;
+          },
+          consumeReset(payload) {
+            window.webkit.messageHandlers.panel.postMessage({ action: 'consumeReset', confirmed: payload?.confirmed === true });
           },
           resize(payload) {
             window.webkit.messageHandlers.panel.postMessage({ action: 'resize', ...payload });
@@ -317,7 +335,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         webView.setValue(false, forKey: "drawsBackground")
         webView.onHoverChanged = { [weak webView, weak panel] entered, pointer in
             if entered {
-                NSApp.activate(ignoringOtherApps: true)
                 panel?.makeKeyAndOrderFront(nil)
             }
             let function = entered ? "window.codexUsageHoverEnter" : "window.codexUsageHoverLeave"
@@ -368,9 +385,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         webView.addSubview(dragHandle, positioned: .above, relativeTo: nil)
         bridge.panel = panel
         bridge.onUsageRequested = { [weak self] in self?.refreshUsage() }
+        bridge.onResetRequested = { [weak self] in self?.consumeResetCredit() }
         self.webView = webView
         panel.orderFrontRegardless()
-        panel.makeKey()
         self.panel = panel
     }
 
@@ -385,10 +402,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
             guard payload["partial"] as? Bool != true else { return }
             self.isRefreshing = false
+            if self.refreshAfterReset {
+                self.refreshAfterReset = false
+                self.refreshUsage()
+                return
+            }
             if payload["error"] != nil {
                 self.scheduleRetry()
             } else {
                 self.retryAttempt = 0
+            }
+        }
+    }
+
+    private func consumeResetCredit() {
+        guard !isResetting else { return }
+        isResetting = true
+        let idempotencyKey = UUID().uuidString.lowercased()
+        usageService.consumeResetCredit(idempotencyKey: idempotencyKey) { [weak self] payload in
+            guard let self else { return }
+            self.isResetting = false
+            self.deliverResetResult(payload)
+            if self.isRefreshing {
+                self.refreshAfterReset = true
+            } else {
+                self.refreshUsage()
             }
         }
     }
@@ -398,6 +436,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
               let data = try? JSONSerialization.data(withJSONObject: payload),
               let json = String(data: data, encoding: .utf8) else { return }
         webView?.evaluateJavaScript("window.updateCodexUsage(\(json));")
+    }
+
+    private func deliverResetResult(_ payload: [String: Any]) {
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView?.evaluateJavaScript("window.codexResetResult?.(\(json));")
     }
 
     private func scheduleRetry() {
@@ -413,12 +458,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        false
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        NSApp.terminate(nil)
-        return true
+        sender.orderFrontRegardless()
+        return false
     }
 }
 
