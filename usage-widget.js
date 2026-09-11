@@ -22,6 +22,7 @@ const DEFAULT_DATA = {
 };
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+const quotaTone = (value) => value == null ? "normal" : value < 10 ? "critical" : value < 20 ? "warning" : "normal";
 
 const hostBridge = {
   getUsage() {
@@ -63,6 +64,10 @@ class CodexUsageWidget extends HTMLElement {
     this.hoverCloseTimer = null;
     this.collapseResizeTimer = null;
     this.quotaAnimationFrame = null;
+    this.expansionPointer = { x: 33, y: 33 };
+    this.dragging = false;
+    this.suppressHoverUntilLeave = false;
+    this.suppressHoverTimer = null;
   }
 
   connectedCallback() {
@@ -234,10 +239,29 @@ class CodexUsageWidget extends HTMLElement {
   }
 
   bindHoverExpansion() {
-    const enter = () => {
+    let pendingDrag = null;
+
+    const beginDrag = () => {
+      this.dragging = true;
+      clearTimeout(this.hoverCloseTimer);
+      clearTimeout(this.collapseResizeTimer);
+      this.collapsed = true;
+      this.setPanelAnchor({ compactX: 0, compactY: 0, pointerX: 33, pointerY: 33 });
+      this.shadowRoot.querySelector(".widget")?.classList.add("collapsed", "dragging");
+    };
+
+    const enter = (pointer) => {
+      if (this.dragging) return;
+      if (this.suppressHoverUntilLeave) return;
       clearTimeout(this.hoverCloseTimer);
       clearTimeout(this.collapseResizeTimer);
       if (!this.collapsed) return;
+      if (Number.isFinite(pointer?.x ?? pointer?.clientX) && Number.isFinite(pointer?.y ?? pointer?.clientY)) {
+        this.expansionPointer = {
+          x: clamp(pointer.x ?? pointer.clientX, 0, 66),
+          y: clamp(pointer.y ?? pointer.clientY, 0, 66),
+        };
+      }
       this.collapsed = false;
       this.syncNativeSize(false);
       requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -247,9 +271,15 @@ class CodexUsageWidget extends HTMLElement {
     };
 
     const leave = () => {
+      if (this.suppressHoverUntilLeave) {
+        this.suppressHoverUntilLeave = false;
+        clearTimeout(this.suppressHoverTimer);
+        return;
+      }
+      if (this.dragging) return;
       clearTimeout(this.hoverCloseTimer);
       this.hoverCloseTimer = setTimeout(() => {
-        if (this.collapsed) return;
+        if (this.collapsed || this.dragging) return;
         this.collapsed = true;
         this.shadowRoot.querySelector(".widget")?.classList.add("collapsed");
         this.collapseResizeTimer = setTimeout(() => {
@@ -260,12 +290,55 @@ class CodexUsageWidget extends HTMLElement {
 
     window.codexUsageHoverEnter = enter;
     window.codexUsageHoverLeave = leave;
+    window.codexUsageDragStarted = beginDrag;
+    window.codexUsageDragEnded = () => {
+      this.dragging = false;
+      this.suppressHoverUntilLeave = true;
+      clearTimeout(this.suppressHoverTimer);
+      this.suppressHoverTimer = setTimeout(() => {
+        this.suppressHoverUntilLeave = false;
+      }, 300);
+      clearTimeout(this.hoverCloseTimer);
+      clearTimeout(this.collapseResizeTimer);
+      this.setPanelAnchor({
+        compactX: 0,
+        compactY: 0,
+        pointerX: this.expansionPointer.x,
+        pointerY: this.expansionPointer.y,
+      });
+      this.collapsed = true;
+      const widget = this.shadowRoot.querySelector(".widget");
+      widget?.classList.add("collapsed");
+      widget?.classList.remove("dragging");
+      this.syncNativeSize(false);
+    };
     this.addEventListener("mouseenter", enter);
     this.addEventListener("mouseleave", leave);
     this.addEventListener("pointerdown", (event) => {
       if (event.button !== 0 || !event.isPrimary) return;
-      hostBridge.beginDrag({ x: event.clientX, y: event.clientY });
+      if (event.clientX < 0 || event.clientX >= 66 || event.clientY < 0 || event.clientY >= 66) return;
+      event.preventDefault();
+      pendingDrag = {
+        pointerId: event.pointerId,
+        screenX: event.screenX,
+        screenY: event.screenY,
+        x: event.clientX,
+        y: event.clientY,
+      };
     });
+    window.addEventListener("pointermove", (event) => {
+      if (!pendingDrag || pendingDrag.pointerId !== event.pointerId || (event.buttons & 1) === 0) return;
+      if (Math.hypot(event.screenX - pendingDrag.screenX, event.screenY - pendingDrag.screenY) < 3) return;
+      const drag = pendingDrag;
+      pendingDrag = null;
+      beginDrag();
+      hostBridge.beginDrag({ x: drag.x, y: drag.y });
+    });
+    const cancelPendingDrag = (event) => {
+      if (pendingDrag?.pointerId === event.pointerId) pendingDrag = null;
+    };
+    window.addEventListener("pointerup", cancelPendingDrag);
+    window.addEventListener("pointercancel", cancelPendingDrag);
   }
 
   animateQuotaFill() {
@@ -301,14 +374,32 @@ class CodexUsageWidget extends HTMLElement {
 
   syncNativeSize(animated) {
     const widget = this.shadowRoot.querySelector(".widget");
-    if (!this.collapsed && widget && window.innerWidth >= 350) {
+    if (widget && (this.autoHover || (!this.collapsed && window.innerWidth >= 350))) {
       this.expandedHeight = Math.ceil(widget.getBoundingClientRect().height);
     }
     hostBridge.resize({
       width: this.collapsed ? 66 : 360,
       height: this.collapsed ? 66 : this.expandedHeight,
       animated,
+      anchorX: this.expansionPointer.x,
+      anchorY: this.expansionPointer.y,
     });
+  }
+
+  setPanelAnchor({ compactX = 0, compactY = 0, pointerX = 33, pointerY = 33 } = {}) {
+    const widget = this.shadowRoot.querySelector(".widget");
+    if (!widget) return;
+    widget.style.setProperty("--compact-x", `${Math.max(0, compactX)}px`);
+    widget.style.setProperty("--compact-y", `${Math.max(0, compactY)}px`);
+    widget.style.setProperty("--expand-x", `${Math.max(0, pointerX)}px`);
+    widget.style.setProperty("--expand-y", `${Math.max(0, pointerY)}px`);
+  }
+
+  applyQuotaTone(element, value) {
+    if (!element) return;
+    const tone = quotaTone(value);
+    element.classList.toggle("quota-warning", tone === "warning");
+    element.classList.toggle("quota-critical", tone === "critical");
   }
 
   setLoading(loading) {
@@ -329,19 +420,29 @@ class CodexUsageWidget extends HTMLElement {
     if (!this.shadowRoot.querySelector(".widget")) return;
     const p = this.data.primary.remainingPercent;
     const s = this.data.secondary.remainingPercent;
-    this.shadowRoot.querySelector(".primary-ring")?.style.setProperty("--value", p ?? 0);
+    const primaryRing = this.shadowRoot.querySelector(".primary-ring");
+    const secondaryFill = this.shadowRoot.querySelector(".secondary-fill");
+    const brandIcon = this.shadowRoot.querySelector(".brand-icon");
+    primaryRing?.style.setProperty("--value", p ?? 0);
+    brandIcon?.style.setProperty("--liquid-level", clamp(p ?? 0, 0, 100));
+    this.applyQuotaTone(primaryRing, p);
+    this.applyQuotaTone(brandIcon, p);
+    this.applyQuotaTone(secondaryFill, s);
     this.shadowRoot.querySelector(".primary-value").textContent = this.formatPercent(p);
     this.shadowRoot.querySelector(".primary-reset").textContent = this.formatReset(this.data.primary.resetsAt);
-    this.shadowRoot.querySelector(".health").textContent = p == null ? "正在同步" : p <= 10 ? "额度较低" : "状态良好";
+    this.shadowRoot.querySelector(".health").textContent = p == null ? "正在同步" : p < 10 ? "额度告警" : p < 20 ? "额度偏低" : "状态良好";
     this.shadowRoot.querySelector(".secondary-value").textContent = this.formatPercent(s);
-    this.shadowRoot.querySelector(".secondary-fill").style.width = `${s ?? 0}%`;
+    secondaryFill.style.width = `${s ?? 0}%`;
     this.shadowRoot.querySelector(".secondary-reset").textContent = this.formatReset(this.data.secondary.resetsAt);
     this.shadowRoot.querySelector(".reset-count").textContent = this.formatNumber(this.data.resetCredits);
     this.shadowRoot.querySelector(".token-count").textContent = this.formatNumber(this.data.todayTokens);
     this.shadowRoot.querySelector(".question-count").textContent = this.formatNumber(this.data.todayQuestions);
     this.shadowRoot.querySelector(".plan").textContent = this.data.plan;
-    this.shadowRoot.querySelector(".updated").textContent = `${this.data.syncMessage} · ${new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(this.data.updatedAt)}`;
+    const updated = this.shadowRoot.querySelector(".updated");
+    updated.textContent = `${this.data.syncMessage} · ${new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(this.data.updatedAt)}`;
+    updated.title = this.data.syncMessage;
     this.applySyncState();
+    requestAnimationFrame(() => this.syncNativeSize(false));
   }
 
   render() {
@@ -350,7 +451,13 @@ class CodexUsageWidget extends HTMLElement {
       <section class="widget ${this.collapsed ? "collapsed" : ""}" aria-label="Codex Meter">
         <header>
           <div class="brand">
-            <span class="brand-icon">${ICONS.spark}</span>
+            <span class="brand-icon" style="--liquid-level:${this.data.primary.remainingPercent ?? 0}">
+              <span class="brand-liquid" aria-hidden="true">
+                <svg class="liquid-wave liquid-wave-back" viewBox="0 0 60 10" preserveAspectRatio="none"><path d="M0 5 Q7.5 0 15 5 T30 5 T45 5 T60 5 V10 H0 Z"/></svg>
+                <svg class="liquid-wave liquid-wave-front" viewBox="0 0 60 10" preserveAspectRatio="none"><path d="M0 5 Q7.5 9 15 5 T30 5 T45 5 T60 5 V10 H0 Z"/></svg>
+              </span>
+              <span class="brand-glyph">${ICONS.spark}</span>
+            </span>
             <div><strong>Codex Meter</strong><span class="plan">${this.data.plan}</span></div>
           </div>
           <div class="actions">
@@ -382,7 +489,7 @@ class CodexUsageWidget extends HTMLElement {
           <div class="stats">
             <article><span class="stat-icon violet">${ICONS.reset}</span><span class="stat-value reset-count">${this.formatNumber(this.data.resetCredits)}</span><span class="stat-label">重置次数</span></article>
             <article><span class="stat-icon cyan">${ICONS.token}</span><span class="stat-value token-count">${this.formatNumber(this.data.todayTokens)}</span><span class="stat-label">今日 Tokens</span></article>
-            <article><span class="stat-icon coral">${ICONS.message}</span><span class="stat-value question-count">${this.data.todayQuestions}</span><span class="stat-label">今日问题</span></article>
+            <article><span class="stat-icon coral">${ICONS.message}</span><span class="stat-value question-count">${this.data.todayQuestions}</span><span class="stat-label">今日对话</span></article>
           </div>
 
           <footer><span class="status-dot"></span><span class="updated">刚刚更新</span><span class="theme-label">跟随系统</span></footer>
@@ -400,11 +507,26 @@ class CodexUsageWidget extends HTMLElement {
       * { box-sizing:border-box; }
       .widget { width:min(360px,calc(100vw - 32px)); border:1px solid var(--line); border-radius:24px; overflow:hidden; background:var(--bg); box-shadow:var(--shadow); backdrop-filter:blur(28px) saturate(1.35); -webkit-backdrop-filter:blur(28px) saturate(1.35); transition:width .3s cubic-bezier(.2,.8,.2,1),background .2s; }
       :host([native]) { width:100vw; }
-      :host([native]) .widget { width:360px; height:443px; border:0; box-shadow:none; clip-path:inset(0 0 0 0 round 24px); will-change:clip-path; transition:clip-path .28s cubic-bezier(.2,.8,.2,1),background .2s; }
+      :host([native]) .widget { --compact-x:0px; --compact-y:0px; --expand-x:33px; --expand-y:33px; width:360px; border:0; box-shadow:none; clip-path:inset(0 0 0 0 round 24px); will-change:clip-path; transition:clip-path .28s cubic-bezier(.2,.8,.2,1),background .2s; }
+      :host([native]) .widget.dragging,
+      :host([native]) .widget.dragging header,
+      :host([native]) .widget.dragging .body { transition:none!important; }
       header { height:66px; display:flex; align-items:center; justify-content:space-between; padding:0 16px 0 18px; border-bottom:1px solid var(--line); }
+      :host([native]) header { position:relative; z-index:2; transform:translate(0,0); transform-origin:var(--expand-x) var(--expand-y); transition:transform .28s cubic-bezier(.2,.8,.2,1),border-color .2s; }
       .brand { display:flex; align-items:center; gap:10px; min-width:0; }
-      .brand-icon { width:30px; height:30px; display:grid; place-items:center; flex:0 0 auto; border-radius:9px; color:white; background:linear-gradient(145deg,#6257e6,#7c77f5 55%,#5e9cf4); box-shadow:inset 0 1px 0 rgba(255,255,255,.35),0 5px 14px rgba(101,91,223,.26); }
-      .brand-icon svg { width:17px; fill:currentColor; }
+      .primary-ring,.secondary-fill,.brand-icon { --quota-start:#6960e8; --quota-end:#8a87f4; --quota-glow:rgba(111,101,231,.25); }
+      .quota-warning { --quota-start:#d99016; --quota-end:#f0ba38; --quota-glow:rgba(224,157,28,.3); }
+      .quota-critical { --quota-start:#df4655; --quota-end:#f06b61; --quota-glow:rgba(229,72,82,.32); }
+      .brand-icon { --liquid-empty:rgba(92,82,210,.48); position:relative; width:30px; height:30px; display:grid; place-items:center; flex:0 0 auto; overflow:hidden; border-radius:9px; color:white; background:var(--liquid-empty); box-shadow:inset 0 1px 0 rgba(255,255,255,.35),0 5px 14px var(--quota-glow); transition:background .35s ease,box-shadow .35s ease; }
+      .brand-icon.quota-warning { --liquid-empty:rgba(190,125,10,.5); }
+      .brand-icon.quota-critical { --liquid-empty:rgba(190,50,65,.5); }
+      .brand-liquid { position:absolute; right:0; bottom:0; left:0; height:calc(var(--liquid-level)*1%); opacity:clamp(0,var(--liquid-level),1); color:var(--quota-end); background:linear-gradient(145deg,var(--quota-start),var(--quota-end)); background-size:180% 180%; animation:liquid-shimmer 3.2s ease-in-out infinite alternate; transition:height .75s cubic-bezier(.2,.8,.2,1),opacity .25s ease,background .35s ease,color .35s ease; }
+      .brand-liquid::after { content:""; position:absolute; inset:0; background:radial-gradient(circle at 24% 76%,rgba(255,255,255,.7) 0 1px,transparent 1.4px),radial-gradient(circle at 68% 88%,rgba(255,255,255,.5) 0 1.2px,transparent 1.7px),radial-gradient(circle at 82% 48%,rgba(255,255,255,.38) 0 .8px,transparent 1.3px); animation:liquid-bubbles 2.6s linear infinite; }
+      .liquid-wave { position:absolute; top:-6px; left:0; width:60px!important; height:10px; overflow:visible; fill:currentColor!important; animation:liquid-flow 1.55s linear infinite; }
+      .liquid-wave-back { top:-4px; opacity:.42; animation-direction:reverse; animation-duration:2.35s; }
+      .liquid-wave-front { opacity:.9; }
+      .brand-glyph { position:relative; z-index:1; display:grid; place-items:center; filter:drop-shadow(0 1px 2px rgba(43,34,110,.25)); }
+      .brand-glyph svg { width:17px; fill:currentColor; }
       .brand div { display:flex; align-items:baseline; gap:8px; white-space:nowrap; }
       .brand strong { font-size:14px; letter-spacing:-.015em; }
       .plan { color:#7268e8; font-size:10px; font-weight:700; letter-spacing:.02em; padding:3px 6px; border-radius:6px; background:rgba(111,99,230,.11); }
@@ -419,10 +541,10 @@ class CodexUsageWidget extends HTMLElement {
       :host(:not([native])) .native-close { display:none; }
       .body { padding:18px; max-height:520px; opacity:1; transition:max-height .3s ease,opacity .2s,padding .3s; }
       .collapsed .body { max-height:0; opacity:0; padding-top:0; padding-bottom:0; pointer-events:none; }
-      :host([native]) .body { transition:opacity .16s ease .08s; }
-      :host([native]) .collapsed .body { max-height:none; padding:18px; opacity:0; }
-      :host([native]) .widget.collapsed { height:443px; clip-path:inset(0 294px 377px 0 round 18px); }
-      :host([native]) .collapsed header { width:360px; padding:0 16px 0 18px; }
+      :host([native]) .body { transform:scale(1); transform-origin:var(--expand-x) var(--expand-y); transition:opacity .16s ease .08s,transform .28s cubic-bezier(.2,.8,.2,1); }
+      :host([native]) .collapsed .body { max-height:none; padding:18px; opacity:0; transform:scale(.965); }
+      :host([native]) .widget.collapsed { clip-path:inset(var(--compact-y) calc(100% - var(--compact-x) - 66px) calc(100% - var(--compact-y) - 66px) var(--compact-x) round 18px); }
+      :host([native]) .collapsed header { width:360px; padding:0 16px 0 18px; transform:translate(var(--compact-x),var(--compact-y)); }
       :host([native]) .collapsed .brand { gap:0; }
       :host([native]) .brand > div,
       :host([native]) .actions { opacity:1; transition:opacity .15s ease .1s; }
@@ -432,7 +554,7 @@ class CodexUsageWidget extends HTMLElement {
       .collapsed header { border-bottom-color:transparent; }
       .collapsed [data-action="collapse"] { transform:rotate(-90deg); }
       .quota-hero { display:flex; align-items:center; gap:17px; padding:15px; border:1px solid var(--line); border-radius:18px; background:var(--panel); }
-      .ring { --value:45; width:88px; height:88px; flex:0 0 auto; display:grid; place-items:center; border-radius:50%; background:conic-gradient(#6c63e8 calc(var(--value)*1%),rgba(120,126,147,.13) 0); position:relative; box-shadow:inset 0 0 0 1px rgba(255,255,255,.22); }
+      .ring { --value:45; width:88px; height:88px; flex:0 0 auto; display:grid; place-items:center; border-radius:50%; background:conic-gradient(var(--quota-start) calc(var(--value)*1%),rgba(120,126,147,.13) 0); position:relative; box-shadow:inset 0 0 0 1px rgba(255,255,255,.22),0 0 16px var(--quota-glow); transition:background .35s ease,box-shadow .35s ease; }
       .ring::before { content:""; position:absolute; inset:7px; border-radius:inherit; background:var(--bg); box-shadow:inset 0 0 0 1px var(--line); }
       .ring-inner { position:relative; z-index:1; display:flex; flex-direction:column; align-items:center; }
       .ring-inner strong { font-size:22px; letter-spacing:-.055em; }
@@ -446,7 +568,7 @@ class CodexUsageWidget extends HTMLElement {
       .row span { color:var(--muted); font-weight:600; }
       .row strong { font-size:13px; }
       .progress { height:6px; overflow:hidden; margin-bottom:8px; border-radius:9px; background:rgba(120,126,147,.13); }
-      .progress i { display:block; height:100%; border-radius:inherit; background:linear-gradient(90deg,#6960e8,#8a87f4); box-shadow:0 0 10px rgba(111,101,231,.25); }
+      .progress i { display:block; height:100%; border-radius:inherit; background:linear-gradient(90deg,var(--quota-start),var(--quota-end)); box-shadow:0 0 10px var(--quota-glow); transition:width .3s ease,background .35s ease,box-shadow .35s ease; }
       .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
       article { min-width:0; padding:12px 9px 11px; border:1px solid var(--line); border-radius:15px; background:var(--panel); }
       .stat-icon { width:25px; height:25px; display:grid; place-items:center; margin-bottom:10px; border-radius:8px; }
@@ -455,12 +577,16 @@ class CodexUsageWidget extends HTMLElement {
       .stat-value { display:block; overflow:hidden; font-size:18px; font-weight:700; letter-spacing:-.04em; text-overflow:ellipsis; }
       .stat-label { display:block; margin-top:3px; color:var(--muted); font-size:9px; white-space:nowrap; }
       footer { display:flex; align-items:center; margin-top:14px; padding:0 3px; color:var(--muted); font-size:9px; }
-      .status-dot { width:6px; height:6px; margin-right:6px; border-radius:50%; background:#45be83; box-shadow:0 0 0 3px rgba(69,190,131,.1); }
+      .updated { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .status-dot { width:6px; height:6px; flex:0 0 auto; margin-right:6px; border-radius:50%; background:#45be83; box-shadow:0 0 0 3px rgba(69,190,131,.1); }
       .sync-loading .status-dot { background:#e6a23c; box-shadow:0 0 0 3px rgba(230,162,60,.12); }
       .sync-error .status-dot { background:#ee5c67; box-shadow:0 0 0 3px rgba(238,92,103,.12); }
-      .theme-label { margin-left:auto; }
+      .theme-label { flex:0 0 auto; margin-left:auto; }
       .loading [data-action="refresh"] svg { animation:spin .8s linear infinite; }
       @keyframes spin { to { transform:rotate(360deg); } }
+      @keyframes liquid-flow { from { transform:translateX(0); } to { transform:translateX(-30px); } }
+      @keyframes liquid-shimmer { from { background-position:0% 25%; } to { background-position:100% 75%; } }
+      @keyframes liquid-bubbles { 0% { transform:translateY(8px); opacity:0; } 18% { opacity:.48; } 82% { opacity:.32; } 100% { transform:translateY(-18px); opacity:0; } }
       @keyframes theme-orbit { 0% { transform:rotate(0) scale(1); } 48% { transform:rotate(-22deg) scale(1.18); } 76% { transform:rotate(7deg) scale(1.06); } 100% { transform:rotate(0) scale(1); } }
       @keyframes refresh-turn { to { transform:rotate(360deg); } }
       @keyframes close-pop { 0% { transform:rotate(0) scale(1); } 60% { transform:rotate(96deg) scale(1.16); } 100% { transform:rotate(90deg) scale(1.08); } }
@@ -475,3 +601,4 @@ customElements.define("codex-usage-widget", CodexUsageWidget);
 // Host integration helpers:
 window.updateCodexUsage = (payload) => document.querySelector("codex-usage-widget")?.updateUsage(payload);
 window.recordCodexTurn = (usage) => document.querySelector("codex-usage-widget")?.recordTurn(usage);
+window.codexUsageSetPanelAnchor = (payload) => document.querySelector("codex-usage-widget")?.setPanelAnchor(payload);

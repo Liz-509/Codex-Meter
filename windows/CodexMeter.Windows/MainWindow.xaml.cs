@@ -18,6 +18,7 @@ namespace CodexMeter.Windows;
 public partial class MainWindow : Window
 {
     private const uint WmNcLeftButtonDown = 0x00A1;
+    private const int WmExitSizeMove = 0x0232;
     private const int HtCaption = 0x0002;
     private static readonly TimeSpan[] RetryDelays =
     [
@@ -30,22 +31,27 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _refreshTimer;
     private readonly CancellationTokenSource _lifetime = new();
     private Forms.NotifyIcon? _trayIcon;
+    private Drawing.Icon? _trayIconImage;
     private bool _isRefreshing;
     private bool _isExiting;
     private bool _webReady;
     private int _retryAttempt;
+    private System.Windows.Point? _compactOrigin;
+    private HwndSource? _windowSource;
+    private bool _isNativeDragging;
 
     public MainWindow()
     {
         InitializeComponent();
 
         Browser.DefaultBackgroundColor = Drawing.Color.Transparent;
-        Browser.MouseEnter += async (_, _) => await NotifyHoverAsync(entered: true);
+        Browser.MouseEnter += async (_, eventArgs) =>
+            await NotifyHoverAsync(entered: true, eventArgs.GetPosition(Browser));
         Browser.MouseLeave += async (_, _) => await NotifyHoverAsync(entered: false);
 
         Loaded += OnLoaded;
         Closed += OnClosed;
-        SourceInitialized += (_, _) => PositionInitially();
+        SourceInitialized += OnSourceInitialized;
         SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
 
         _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };
@@ -234,23 +240,90 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task NotifyHoverAsync(bool entered)
+    private async Task NotifyHoverAsync(bool entered, System.Windows.Point? pointer = null)
     {
         if (!_webReady || Browser.CoreWebView2 is null) return;
+        if (!entered && _isNativeDragging) return;
         var function = entered ? "window.codexUsageHoverEnter" : "window.codexUsageHoverLeave";
-        try { await Browser.CoreWebView2.ExecuteScriptAsync($"{function}?.();"); } catch { }
+        var argument = pointer is { } point
+            ? JsonSerializer.Serialize(new { x = point.X, y = point.Y })
+            : string.Empty;
+        try { await Browser.CoreWebView2.ExecuteScriptAsync($"{function}?.({argument});"); } catch { }
     }
 
     private void ResizePanel(JsonElement message)
     {
         var requestedWidth = message.TryGetProperty("width", out var widthValue) ? widthValue.GetDouble() : Width;
         var requestedHeight = message.TryGetProperty("height", out var heightValue) ? heightValue.GetDouble() : Height;
-        var frame = PanelLayout.ResizeKeepingTopLeft(Left, Top, requestedWidth, requestedHeight);
+        var expanding = requestedWidth > PanelLayout.CompactSize || requestedHeight > PanelLayout.CompactSize;
+        var area = GetCurrentWorkArea();
+
+        if (expanding && _compactOrigin is null)
+        {
+            _compactOrigin = new System.Windows.Point(Left, Top);
+        }
+
+        var origin = _compactOrigin ?? new System.Windows.Point(Left, Top);
+        var frame = expanding
+            ? PanelLayout.ResizeWithinWorkArea(
+                origin.X,
+                origin.Y,
+                requestedWidth,
+                requestedHeight,
+                area.Left,
+                area.Top,
+                area.Right,
+                area.Bottom)
+            : PanelLayout.ResizeKeepingTopLeft(
+                origin.X,
+                origin.Y,
+                requestedWidth,
+                requestedHeight);
 
         Width = frame.Width;
         Height = frame.Height;
         Left = frame.Left;
         Top = frame.Top;
+
+        if (expanding && _compactOrigin is { } compactOrigin)
+        {
+            var anchorX = ReadFiniteNumber(message, "anchorX", PanelLayout.CompactSize / 2);
+            var anchorY = ReadFiniteNumber(message, "anchorY", PanelLayout.CompactSize / 2);
+            UpdateExpansionAnchor(
+                compactOrigin.X - frame.Left,
+                compactOrigin.Y - frame.Top,
+                anchorX,
+                anchorY);
+        }
+        else
+        {
+            _compactOrigin = null;
+            UpdateExpansionAnchor(0, 0, PanelLayout.CompactSize / 2, PanelLayout.CompactSize / 2);
+        }
+    }
+
+    private static double ReadFiniteNumber(JsonElement message, string propertyName, double fallback)
+    {
+        if (!message.TryGetProperty(propertyName, out var value) ||
+            !value.TryGetDouble(out var number) ||
+            !double.IsFinite(number))
+        {
+            return fallback;
+        }
+        return Math.Clamp(number, 0, PanelLayout.CompactSize);
+    }
+
+    private void UpdateExpansionAnchor(double compactX, double compactY, double pointerX, double pointerY)
+    {
+        if (!_webReady || Browser.CoreWebView2 is null) return;
+        var payload = JsonSerializer.Serialize(new
+        {
+            compactX,
+            compactY,
+            pointerX = compactX + pointerX,
+            pointerY = compactY + pointerY
+        });
+        _ = Browser.CoreWebView2.ExecuteScriptAsync($"window.codexUsageSetPanelAnchor?.({payload});");
     }
 
     private void BeginNativeDrag(JsonElement message)
@@ -266,8 +339,57 @@ public partial class MainWindow : Window
 
         var handle = new WindowInteropHelper(this).Handle;
         if (handle == IntPtr.Zero || !GetCursorPos(out var cursor)) return;
+        _isNativeDragging = true;
+        _compactOrigin = new System.Windows.Point(Left, Top);
+        Width = PanelLayout.CompactSize;
+        Height = PanelLayout.CompactSize;
+        Left = _compactOrigin.Value.X;
+        Top = _compactOrigin.Value.Y;
+        UpdateExpansionAnchor(0, 0, PanelLayout.CompactSize / 2, PanelLayout.CompactSize / 2);
         ReleaseCapture();
         SendMessage(handle, WmNcLeftButtonDown, (nint)HtCaption, PackScreenPoint(cursor));
+        if (_isNativeDragging)
+        {
+            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(CompleteNativeDrag));
+        }
+    }
+
+    private void OnSourceInitialized(object? sender, EventArgs e)
+    {
+        PositionInitially();
+        var handle = new WindowInteropHelper(this).Handle;
+        _windowSource = HwndSource.FromHwnd(handle);
+        _windowSource?.AddHook(WindowMessageHook);
+    }
+
+    private nint WindowMessageHook(
+        nint hwnd,
+        int message,
+        nint wParam,
+        nint lParam,
+        ref bool handled)
+    {
+        if (message == WmExitSizeMove && _isNativeDragging)
+        {
+            Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(CompleteNativeDrag));
+        }
+        return 0;
+    }
+
+    private async void CompleteNativeDrag()
+    {
+        if (!_isNativeDragging) return;
+        _isNativeDragging = false;
+        _compactOrigin = new System.Windows.Point(Left, Top);
+        if (_compactOrigin is { } compactOrigin)
+        {
+            Width = PanelLayout.CompactSize;
+            Height = PanelLayout.CompactSize;
+            Left = compactOrigin.X;
+            Top = compactOrigin.Y;
+        }
+        if (!_webReady || Browser.CoreWebView2 is null) return;
+        try { await Browser.CoreWebView2.ExecuteScriptAsync("window.codexUsageDragEnded?.();"); } catch { }
     }
 
     private static nint PackScreenPoint(NativePoint point)
@@ -310,17 +432,31 @@ public partial class MainWindow : Window
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add("退出", null, (_, _) => Dispatcher.Invoke(ExitApplication));
 
-        var executableIcon = Environment.ProcessPath is { } path
-            ? Drawing.Icon.ExtractAssociatedIcon(path)
-            : null;
+        _trayIconImage = LoadApplicationIcon();
         _trayIcon = new Forms.NotifyIcon
         {
             Text = "Codex Meter",
-            Icon = executableIcon ?? Drawing.SystemIcons.Application,
+            Icon = _trayIconImage,
             ContextMenuStrip = menu,
             Visible = true
         };
         _trayIcon.DoubleClick += (_, _) => Dispatcher.Invoke(ShowPanel);
+    }
+
+    private static Drawing.Icon LoadApplicationIcon()
+    {
+        var resource = System.Windows.Application.GetResourceStream(
+            new Uri("pack://application:,,,/Assets/AppIcon.ico", UriKind.Absolute));
+        if (resource is not null)
+        {
+            using var stream = resource.Stream;
+            using var icon = new Drawing.Icon(stream);
+            return (Drawing.Icon)icon.Clone();
+        }
+
+        return Environment.ProcessPath is { } path
+            ? Drawing.Icon.ExtractAssociatedIcon(path) ?? (Drawing.Icon)Drawing.SystemIcons.Application.Clone()
+            : (Drawing.Icon)Drawing.SystemIcons.Application.Clone();
     }
 
     private static void ShowWebViewRuntimeMessage()
@@ -354,11 +490,13 @@ public partial class MainWindow : Window
         _lifetime.Cancel();
         _refreshTimer.Stop();
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+        _windowSource?.RemoveHook(WindowMessageHook);
         if (_trayIcon is not null)
         {
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
         }
+        _trayIconImage?.Dispose();
         _lifetime.Dispose();
         if (!_isExiting) ExitApplication();
     }

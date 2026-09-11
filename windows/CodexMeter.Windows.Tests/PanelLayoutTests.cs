@@ -51,4 +51,58 @@ public sealed class PanelLayoutTests
         Assert.AreEqual(360, frame.Width);
         Assert.AreEqual(66, frame.Height);
     }
+
+    [TestMethod]
+    public void ResizeWithinWorkArea_ShiftsPanelAwayFromRightAndBottomEdges()
+    {
+        var frame = PanelLayout.ResizeWithinWorkArea(
+            left: 1850,
+            top: 900,
+            requestedWidth: 360,
+            requestedHeight: 450,
+            workAreaLeft: 0,
+            workAreaTop: 0,
+            workAreaRight: 1920,
+            workAreaBottom: 1040);
+
+        Assert.AreEqual(1560, frame.Left);
+        Assert.AreEqual(590, frame.Top);
+        Assert.AreEqual(360, frame.Width);
+        Assert.AreEqual(450, frame.Height);
+    }
+
+    [TestMethod]
+    public void ResizeWithinWorkArea_PreservesPositionWhenPanelFits()
+    {
+        var frame = PanelLayout.ResizeWithinWorkArea(
+            left: -1500,
+            top: 80,
+            requestedWidth: 360,
+            requestedHeight: 450,
+            workAreaLeft: -1920,
+            workAreaTop: 0,
+            workAreaRight: 0,
+            workAreaBottom: 1040);
+
+        Assert.AreEqual(-1500, frame.Left);
+        Assert.AreEqual(80, frame.Top);
+    }
+
+    [TestMethod]
+    public void ResizeWithinWorkArea_ShiftsPanelAwayFromLeftAndTopEdges()
+    {
+        var frame = PanelLayout.ResizeWithinWorkArea(
+            left: -40,
+            top: -25,
+            requestedWidth: 360,
+            requestedHeight: 450,
+            workAreaLeft: 0,
+            workAreaTop: 0,
+            workAreaRight: 1920,
+            workAreaBottom: 1040);
+
+        Assert.AreEqual(0, frame.Left);
+        Assert.AreEqual(0, frame.Top);
+    }
+
 }

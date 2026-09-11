@@ -11,6 +11,8 @@ module_cache="$build_dir/module-cache"
 iconset_dir="$build_dir/AppIcon.iconset"
 icon_generator="$build_dir/AppIconGenerator"
 icns_builder="$build_dir/ICNSBuilder"
+ico_builder="$build_dir/ICOBuilder"
+windows_icon="$project_dir/windows/CodexMeter.Windows/Assets/AppIcon.ico"
 
 host_arch="${CODEX_USAGE_ARCH:-$(uname -m)}"
 deployment_target="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
@@ -34,7 +36,7 @@ fi
 swiftc_bin="${SWIFTC:-$(xcrun --find swiftc 2>/dev/null || command -v swiftc)}"
 target="$host_arch-apple-macos$deployment_target"
 
-mkdir -p "$macos_dir" "$resources_dir" "$module_cache" "$iconset_dir"
+mkdir -p "$macos_dir" "$resources_dir" "$module_cache" "$iconset_dir" "${windows_icon:h}"
 
 "$swiftc_bin" \
   "$project_dir/native/AppIconGenerator.swift" \
@@ -70,6 +72,15 @@ render_icon 1024 icon_512x512@2x.png
   -parse-as-library \
   -module-cache-path "$module_cache"
 "$icns_builder" "$iconset_dir" "$resources_dir/AppIcon.icns"
+
+"$swiftc_bin" \
+  "$project_dir/native/ICOBuilder.swift" \
+  -o "$ico_builder" \
+  -sdk "$sdk_path" \
+  -target "$target" \
+  -parse-as-library \
+  -module-cache-path "$module_cache"
+"$ico_builder" "$iconset_dir" "$windows_icon"
 
 "$swiftc_bin" \
   "$project_dir/native/CompanionApp.swift" \
