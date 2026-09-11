@@ -38,6 +38,28 @@ private final class JSONLineResponseCollector: @unchecked Sendable {
 }
 
 final class CodexUsageService {
+    private struct DailyTokenStats {
+        let date: String
+        let tokens: Int
+    }
+
+    private struct ConversationStats {
+        let turnId: String
+        let threadId: String?
+        let contextWindowId: String?
+        let startedAt: Date
+        var preview: String
+        var tokens: Int?
+    }
+
+    private struct LocalStats {
+        let dailyTokens: [DailyTokenStats]
+        let conversations: [ConversationStats]
+
+        var questions: Int { conversations.count }
+        var tokens: Int { dailyTokens.last?.tokens ?? 0 }
+    }
+
     private enum ServiceError: LocalizedError {
         case binaryMissing
         case timedOut
@@ -60,13 +82,8 @@ final class CodexUsageService {
 
     func fetch(completion: @escaping ([String: Any]) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
-            let localStats = self.localStatsToday()
-            var payload: [String: Any] = [
-                "today": [
-                    "questions": localStats.questions,
-                    "tokens": localStats.tokens
-                ]
-            ]
+            let localStats = self.localStats()
+            var payload = self.localPayload(from: localStats)
 
             var partialPayload = payload
             partialPayload["partial"] = true
@@ -79,20 +96,30 @@ final class CodexUsageService {
                 let responses = try self.readAccountData()
                 let limits = try self.result(for: 1, method: "额度", in: responses)
                 let usage = try self.result(for: 2, method: "Token", in: responses)
+                payload = self.localPayload(
+                    from: localStats,
+                    threadNames: self.threadNames(from: responses)
+                )
 
                 for (key, value) in limits {
                     payload[key] = value
                 }
 
-                var today = payload["today"] as? [String: Any] ?? [:]
-                if localStats.tokens == 0,
-                   let buckets = usage["dailyUsageBuckets"] as? [[String: Any]] {
-                    let date = self.localDateString()
-                    today["tokens"] = buckets.first(where: {
-                        $0["startDate"] as? String == date
-                    })?["tokens"] ?? 0
+                if let buckets = usage["dailyUsageBuckets"] as? [[String: Any]],
+                   let accountHistory = self.accountHistory(
+                       from: buckets,
+                       localDays: localStats.dailyTokens
+                   ) {
+                    payload["history"] = [
+                        "source": "account",
+                        "localFallback": accountHistory.localFallback,
+                        "dailyTokens": accountHistory.days.map { ["date": $0.date, "tokens": $0.tokens] }
+                    ]
+                    var today = payload["today"] as? [String: Any] ?? [:]
+                    today["tokens"] = accountHistory.days.last?.tokens ?? localStats.tokens
+                    today["tokenSource"] = accountHistory.todayFromAccount ? "account" : "local"
+                    payload["today"] = today
                 }
-                payload["today"] = today
                 payload["source"] = "Codex App Server"
             } catch {
                 payload["error"] = error.localizedDescription
@@ -104,7 +131,48 @@ final class CodexUsageService {
         }
     }
 
+    func consumeResetCredit(idempotencyKey: String, completion: @escaping ([String: Any]) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let payload: [String: Any]
+            do {
+                let responses = try self.performRequests([
+                    [
+                        "method": "account/rateLimitResetCredit/consume",
+                        "id": 1,
+                        "params": ["idempotencyKey": idempotencyKey]
+                    ]
+                ], waitingFor: [1])
+                let result = try self.result(for: 1, method: "重置", in: responses)
+                guard let outcome = result["outcome"] as? String else {
+                    throw ServiceError.responseMissing("重置结果")
+                }
+                payload = ["outcome": outcome]
+            } catch {
+                payload = ["error": error.localizedDescription]
+            }
+
+            DispatchQueue.main.async {
+                completion(payload)
+            }
+        }
+    }
+
     private func readAccountData() throws -> [Int: [String: Any]] {
+        try performRequests([
+            ["method": "account/rateLimits/read", "id": 1],
+            ["method": "account/usage/read", "id": 2],
+            [
+                "method": "thread/list",
+                "id": 3,
+                "params": ["limit": 100, "sortKey": "updated_at"]
+            ]
+        ], waitingFor: [1, 2, 3])
+    }
+
+    private func performRequests(
+        _ requests: [[String: Any]],
+        waitingFor responseIDs: Set<Int>
+    ) throws -> [Int: [String: Any]] {
         guard let executable = codexExecutable else {
             throw ServiceError.binaryMissing
         }
@@ -144,7 +212,7 @@ final class CodexUsageService {
                     "clientInfo": [
                         "name": "codex_usage_widget",
                         "title": "Codex Meter",
-                        "version": "1.2.0"
+                        "version": "1.3.0"
                     ]
                 ]
             ], to: input.fileHandleForWriting)
@@ -158,10 +226,11 @@ final class CodexUsageService {
             }
 
             try send(["method": "initialized", "params": [:]], to: input.fileHandleForWriting)
-            try send(["method": "account/rateLimits/read", "id": 1], to: input.fileHandleForWriting)
-            try send(["method": "account/usage/read", "id": 2], to: input.fileHandleForWriting)
+            for request in requests {
+                try send(request, to: input.fileHandleForWriting)
+            }
 
-            guard let responses = collector.wait(for: [1, 2], timeout: 20) else {
+            guard let responses = collector.wait(for: responseIDs, timeout: 20) else {
                 throw ServiceError.timedOut
             }
             return responses
@@ -217,25 +286,117 @@ final class CodexUsageService {
         })
     }
 
-    private func localDateString() -> String {
+    private func dateFormatter() -> DateFormatter {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = .current
         formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: Date())
+        return formatter
     }
 
-    private func localStatsToday() -> (questions: Int, tokens: Int) {
+    private func localPayload(
+        from stats: LocalStats,
+        threadNames: [String: String] = [:]
+    ) -> [String: Any] {
+        [
+            "today": [
+                "questions": stats.questions,
+                "tokens": stats.tokens,
+                "tokenSource": "local",
+                "conversations": stats.conversations.map { conversation in
+                    var item: [String: Any] = [
+                        "turnId": conversation.turnId,
+                        "startedAt": ISO8601DateFormatter().string(from: conversation.startedAt),
+                        "preview": conversation.preview
+                    ]
+                    if let threadId = conversation.threadId { item["threadId"] = threadId }
+                    if let threadId = conversation.threadId,
+                       let threadName = threadNames[threadId] {
+                        item["threadName"] = threadName
+                    }
+                    if let contextWindowId = conversation.contextWindowId {
+                        item["contextWindowId"] = contextWindowId
+                    }
+                    if let tokens = conversation.tokens { item["tokens"] = tokens }
+                    return item
+                }
+            ],
+            "history": [
+                "source": "local",
+                "dailyTokens": stats.dailyTokens.map { ["date": $0.date, "tokens": $0.tokens] }
+            ]
+        ]
+    }
+
+    private func threadNames(from responses: [Int: [String: Any]]) -> [String: String] {
+        guard let response = responses[3],
+              response["error"] == nil,
+              let result = response["result"] as? [String: Any],
+              let threads = result["data"] as? [[String: Any]] else { return [:] }
+
+        var names: [String: String] = [:]
+        for thread in threads {
+            guard let name = thread["name"] as? String,
+                  !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            for key in [thread["id"] as? String, thread["sessionId"] as? String].compactMap({ $0 }) {
+                if names[key] == nil { names[key] = name }
+            }
+        }
+        return names
+    }
+
+    private func accountHistory(
+        from buckets: [[String: Any]],
+        localDays: [DailyTokenStats]
+    ) -> (days: [DailyTokenStats], localFallback: Bool, todayFromAccount: Bool)? {
+        var values: [String: Int] = [:]
+        for bucket in buckets {
+            guard let date = bucket["startDate"] as? String,
+                  let tokens = (bucket["tokens"] as? NSNumber)?.intValue else { continue }
+            values[date] = tokens
+        }
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
-        let start = calendar.startOfDay(for: Date())
-        let end = calendar.date(byAdding: .day, value: 1, to: start) ?? Date.distantFuture
+        let formatter = dateFormatter()
+        let today = calendar.startOfDay(for: Date())
+        let dates = (0..<7).compactMap { offset in
+            calendar.date(byAdding: .day, value: offset - 6, to: today)
+        }
+        let keys = dates.map(formatter.string(from:))
+        guard keys.contains(where: { values[$0] != nil }) else { return nil }
 
-        let isoFormatter = ISO8601DateFormatter()
-        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let startTimestamp = isoFormatter.string(from: start)
-        let endTimestamp = isoFormatter.string(from: end)
+        let localValues = Dictionary(uniqueKeysWithValues: localDays.map { ($0.date, $0.tokens) })
+        var localFallback = false
+        let days = dates.map { date in
+            let key = formatter.string(from: date)
+            if let tokens = values[key] {
+                return DailyTokenStats(date: key, tokens: tokens)
+            }
+            let tokens = localValues[key] ?? 0
+            if tokens > 0 { localFallback = true }
+            return DailyTokenStats(date: key, tokens: tokens)
+        }
+        guard let todayKey = keys.last else { return nil }
+        return (
+            days: days,
+            localFallback: localFallback,
+            todayFromAccount: values[todayKey] != nil
+        )
+    }
+
+    private func localStats() -> LocalStats {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let today = calendar.startOfDay(for: Date())
+        let historyStart = calendar.date(byAdding: .day, value: -6, to: today) ?? today
+        let formatter = dateFormatter()
+        let dayKeys = (0..<7).compactMap { offset -> String? in
+            guard let date = calendar.date(byAdding: .day, value: offset, to: historyStart) else { return nil }
+            return formatter.string(from: date)
+        }
+        var dailyTokens = Dictionary(uniqueKeysWithValues: dayKeys.map { ($0, 0) })
+        let todayKey = formatter.string(from: today)
 
         let environment = ProcessInfo.processInfo.environment
         let codexHome: URL
@@ -251,41 +412,154 @@ final class CodexUsageService {
             at: directory,
             includingPropertiesForKeys: [.contentModificationDateKey],
             options: [.skipsHiddenFiles]
-        ) else { return (0, 0) }
+        ) else {
+            return LocalStats(
+                dailyTokens: dayKeys.map { DailyTokenStats(date: $0, tokens: 0) },
+                conversations: []
+            )
+        }
 
-        var questions = 0
-        var tokens = 0
+        var conversations: [String: ConversationStats] = [:]
         for case let file as URL in enumerator where file.pathExtension == "jsonl" {
             guard let values = try? file.resourceValues(forKeys: [.contentModificationDateKey]),
                   let modifiedAt = values.contentModificationDate,
-                  modifiedAt >= start else { continue }
+                  modifiedAt >= historyStart else { continue }
             guard let contents = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            var threadId: String?
+            var contextWindowId: String?
+            var currentTurnId: String?
             var previousTotal = 0
+            var usageRecordSinceTokenCount = false
 
             contents.enumerateLines { line, _ in
                 guard let data = line.data(using: .utf8),
                       let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      object["type"] as? String == "event_msg",
-                      let event = object["payload"] as? [String: Any] else { return }
+                      let rootType = object["type"] as? String,
+                      let payload = object["payload"] as? [String: Any] else { return }
 
-                let timestamp = object["timestamp"] as? String ?? ""
-                let isToday = timestamp >= startTimestamp && timestamp < endTimestamp
-
-                if event["type"] as? String == "task_started", isToday {
-                    questions += 1
+                if rootType == "session_meta" {
+                    threadId = payload["id"] as? String ?? threadId
+                    if let contextWindow = payload["context_window"] as? [String: Any] {
+                        contextWindowId = contextWindow["window_id"] as? String ?? contextWindowId
+                    }
+                    return
                 }
 
-                guard event["type"] as? String == "token_count",
-                      let info = event["info"] as? [String: Any],
-                      let totalUsage = info["total_token_usage"] as? [String: Any],
-                      let total = (totalUsage["total_tokens"] as? NSNumber)?.intValue else { return }
+                if rootType == "event_msg" {
+                    let eventType = payload["type"] as? String
+                    if eventType == "task_started" {
+                        let turnId = payload["turn_id"] as? String ?? UUID().uuidString.lowercased()
+                        currentTurnId = turnId
+                        guard let startedAt = self.parseTimestamp(object["timestamp"] as? String),
+                              formatter.string(from: startedAt) == todayKey else { return }
+                        conversations[turnId] = ConversationStats(
+                            turnId: turnId,
+                            threadId: threadId,
+                            contextWindowId: contextWindowId,
+                            startedAt: startedAt,
+                            preview: "未命名对话",
+                            tokens: nil
+                        )
+                        return
+                    }
 
-                if isToday {
-                    tokens += total >= previousTotal ? total - previousTotal : total
+                    if eventType == "user_message",
+                       let turnId = currentTurnId,
+                       var conversation = conversations[turnId],
+                       let message = payload["message"] as? String,
+                       !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        conversation.preview = self.normalizePreview(message)
+                        conversations[turnId] = conversation
+                        return
+                    }
+
+                    guard eventType == "token_count",
+                          let info = payload["info"] as? [String: Any],
+                          let totalUsage = info["total_token_usage"] as? [String: Any],
+                          let total = (totalUsage["total_tokens"] as? NSNumber)?.intValue else { return }
+
+                    let delta = total >= previousTotal ? total - previousTotal : total
+                    previousTotal = total
+                    if usageRecordSinceTokenCount {
+                        usageRecordSinceTokenCount = false
+                        return
+                    }
+                    guard let timestamp = self.parseTimestamp(object["timestamp"] as? String) else { return }
+                    let dateKey = formatter.string(from: timestamp)
+                    if dailyTokens[dateKey] != nil { dailyTokens[dateKey, default: 0] += max(0, delta) }
+                    if let turnId = currentTurnId, var conversation = conversations[turnId] {
+                        conversation.tokens = (conversation.tokens ?? 0) + max(0, delta)
+                        conversations[turnId] = conversation
+                    }
+                    return
                 }
-                previousTotal = total
+
+                if rootType == "token_usage_record" {
+                    let turnId = payload["turn_id"] as? String ?? currentTurnId
+                    var countedUsageRecord = false
+                    if let usage = payload["usage"] as? [String: Any],
+                       let responseTokens = (usage["total_tokens"] as? NSNumber)?.intValue,
+                       let timestamp = self.parseTimestamp(object["timestamp"] as? String) {
+                        let dateKey = formatter.string(from: timestamp)
+                        if dailyTokens[dateKey] != nil {
+                            dailyTokens[dateKey, default: 0] += max(0, responseTokens)
+                        }
+                        countedUsageRecord = true
+                    }
+                    if let turnId,
+                       var conversation = conversations[turnId],
+                       let turnUsage = payload["turn_token_usage"] as? [String: Any],
+                       let turnTokens = (turnUsage["total_tokens"] as? NSNumber)?.intValue {
+                        conversation.tokens = max(0, turnTokens)
+                        conversations[turnId] = conversation
+                    }
+                    usageRecordSinceTokenCount = countedUsageRecord
+                    return
+                }
+
+                guard rootType == "response_item",
+                      payload["type"] as? String == "message",
+                      payload["role"] as? String == "user",
+                      let metadata = payload["internal_chat_message_metadata_passthrough"] as? [String: Any],
+                      let kinds = metadata["content_item_kinds"] as? [String],
+                      kinds.contains("user.text"),
+                      let turnId = metadata["turn_id"] as? String ?? currentTurnId,
+                      var conversation = conversations[turnId],
+                      let content = payload["content"] as? [[String: Any]] else { return }
+                let text = content.compactMap { item -> String? in
+                    guard let type = item["type"] as? String,
+                          type == "input_text" || type == "text" else { return nil }
+                    return item["text"] as? String
+                }.joined(separator: " ")
+                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    conversation.preview = self.normalizePreview(text)
+                    conversations[turnId] = conversation
+                }
             }
         }
-        return (questions, tokens)
+
+        return LocalStats(
+            dailyTokens: dayKeys.map { DailyTokenStats(date: $0, tokens: dailyTokens[$0] ?? 0) },
+            conversations: conversations.values.sorted { $0.startedAt > $1.startedAt }
+        )
+    }
+
+    private func parseTimestamp(_ value: String?) -> Date? {
+        guard let value else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
+    }
+
+    private func normalizePreview(_ value: String) -> String {
+        let normalized = value
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard normalized.count > 160 else { return normalized }
+        let end = normalized.index(normalized.startIndex, offsetBy: 160)
+        return normalized[..<end].trimmingCharacters(in: .whitespacesAndNewlines) + "…"
     }
 }

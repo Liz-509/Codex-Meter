@@ -33,6 +33,8 @@ public partial class MainWindow : Window
     private Forms.NotifyIcon? _trayIcon;
     private Drawing.Icon? _trayIconImage;
     private bool _isRefreshing;
+    private bool _isResetting;
+    private bool _refreshAfterReset;
     private bool _isExiting;
     private bool _webReady;
     private int _retryAttempt;
@@ -115,6 +117,9 @@ public partial class MainWindow : Window
                 window.chrome.webview.postMessage({ action: 'getUsage' });
                 return null;
               },
+              consumeReset(payload) {
+                window.chrome.webview.postMessage({ action: 'consumeReset', confirmed: payload?.confirmed === true });
+              },
               resize(payload) {
                 window.chrome.webview.postMessage({ action: 'resize', ...payload });
               },
@@ -157,6 +162,13 @@ public partial class MainWindow : Window
             {
                 case "getUsage":
                     await RefreshUsageAsync();
+                    break;
+                case "consumeReset":
+                    if (root.TryGetProperty("confirmed", out var confirmed) &&
+                        confirmed.ValueKind is JsonValueKind.True)
+                    {
+                        await ConsumeResetCreditAsync();
+                    }
                     break;
                 case "resize":
                     ResizePanel(root);
@@ -203,6 +215,40 @@ public partial class MainWindow : Window
         {
             _isRefreshing = false;
         }
+
+        if (_refreshAfterReset)
+        {
+            _refreshAfterReset = false;
+            await RefreshUsageAsync();
+        }
+    }
+
+    private async Task ConsumeResetCreditAsync()
+    {
+        if (_isResetting) return;
+        _isResetting = true;
+        try
+        {
+            var payload = await _usageService.ConsumeResetCreditAsync(
+                Guid.NewGuid().ToString("D"),
+                _lifetime.Token);
+            await DeliverResetResultAsync(payload);
+            if (_isRefreshing)
+            {
+                _refreshAfterReset = true;
+            }
+            else
+            {
+                await RefreshUsageAsync();
+            }
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+        }
+        finally
+        {
+            _isResetting = false;
+        }
     }
 
     private async Task DeliverAsync(JsonObject payload)
@@ -210,6 +256,13 @@ public partial class MainWindow : Window
         if (!_webReady || Browser.CoreWebView2 is null) return;
         var json = payload.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
         await Browser.CoreWebView2.ExecuteScriptAsync($"window.updateCodexUsage({json});");
+    }
+
+    private async Task DeliverResetResultAsync(JsonObject payload)
+    {
+        if (!_webReady || Browser.CoreWebView2 is null) return;
+        var json = payload.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
+        await Browser.CoreWebView2.ExecuteScriptAsync($"window.codexResetResult?.({json});");
     }
 
     private Task DeliverOnDispatcherAsync(JsonObject payload)
