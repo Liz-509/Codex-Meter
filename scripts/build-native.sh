@@ -87,6 +87,7 @@ render_icon 1024 icon_512x512@2x.png
   "$project_dir/native/CodexUsageService.swift" \
   -o "$macos_dir/CodexUsageCompanion" \
   -framework AppKit \
+  -framework ServiceManagement \
   -framework WebKit \
   -sdk "$sdk_path" \
   -target "$target" \

@@ -16,7 +16,7 @@ Codex Meter is a lightweight native usage widget for Codex on macOS and Windows.
 - Drag the compact icon anywhere, or pin the expanded panel so it stays open. The pin preference is remembered across restarts.
 - Follow the system appearance or select light or dark mode.
 - Keep the widget above other windows on macOS and Windows.
-- Run entirely on your device with no analytics, separate backend, credential storage, login item, or Codex lifecycle hook.
+- Run entirely on your device with no analytics, separate backend, credential storage, or Codex lifecycle hook. Launch at login is optional and disabled until you enable it in Settings.
 
 ## How to use Codex Meter
 
@@ -26,7 +26,7 @@ Codex Meter is a lightweight native usage widget for Codex on macOS and Windows.
 4. Click **Today Tokens** to open the seven-day usage chart, or **Today Conversations** to inspect today's local turns.
 5. Use the controls in the header to change the theme, refresh immediately, pin or unpin the panel, collapse it, or quit the app.
 
-Codex Meter refreshes automatically every minute. It also refreshes when it starts, when you press the refresh button, and after a reset-credit request. When the panel is not pinned, it collapses after the pointer leaves; open dialogs and active drags keep it expanded. The native host keeps expansion inside the current screen's usable area, including when the icon is close to an edge.
+Codex Meter refreshes automatically every minute after its first successful sync. At startup, it retries rapidly until data arrives. It also refreshes when you press the refresh button and after a reset-credit request. When the panel is not pinned, it collapses after the pointer leaves; open dialogs and active drags keep it expanded. The native host keeps expansion inside the current screen's usable area, including when the icon is close to an edge.
 
 ## What the numbers mean
 
@@ -56,7 +56,7 @@ The theme control cycles through **Follow System**, **Light**, and **Dark**. The
 
 ## Reliability and local fallback
 
-Codex Meter reads local session statistics first, so today's activity can appear while account limits are still syncing. If the account request fails, local token and conversation details remain available, the panel shows the sync error, and the native host retries after short delays. Regular one-minute refreshes continue afterward.
+Codex Meter reads local session statistics first, so today's activity can appear while account limits are still syncing. Until the first successful account sync, the native host keeps retrying at short intervals. If a later account request fails, local token and conversation details remain available, the panel shows the sync error, and the native host retries after short delays. Regular one-minute refreshes continue afterward.
 
 Structured session files are scanned from `~/.codex/sessions`, or from `$CODEX_HOME/sessions` when `CODEX_HOME` is set. Unchanged files are cached between refreshes. Dates and “today” use the device's current local time zone.
 
@@ -75,10 +75,10 @@ Windows does not expose a stable public equivalent of macOS “all Spaces,” an
 
 ## Download and install
 
-- [macOS Apple Silicon installer — Codex Meter v1.4.0](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.0/Codex-Meter-macOS-arm64-v1.4.0.dmg)
-- [Windows 10/11 x64 — Codex Meter v1.4.0](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.0/Codex-Meter-Windows-x64-v1.4.0.zip)
+- [macOS Apple Silicon installer — Codex Meter v1.4.1](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.1/Codex-Meter-macOS-arm64-v1.4.1.dmg)
+- [Windows 10/11 x64 installer — Codex Meter v1.4.1](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.1/Codex-Meter-Windows-x64-v1.4.1.exe)
 
-On macOS, open the downloaded DMG and drag `Codex Meter` to the Applications shortcut, then launch it from Applications. On Windows, unzip the archive and run `Codex Meter.exe` directly; installation and administrator access are not required. Intel Mac users can build an installer from source.
+On macOS, open the downloaded DMG and drag `Codex Meter` to the Applications shortcut, then launch it from Applications. On Windows, open the downloaded setup EXE and follow the installer; you can choose the installation location and whether to create a desktop shortcut. The app is added to the Start menu and can be removed from **Installed apps**; the uninstaller can either preserve or remove Codex Meter's local preferences without touching Codex sessions. Intel Mac users can build an installer from source.
 
 Because the macOS app is not notarized, macOS may ask you to confirm the first launch. Control-click the app, choose **Open**, then confirm **Open**.
 
@@ -149,7 +149,7 @@ Install the .NET 8 SDK, clone the repository, and run the following command in P
 .\scripts\build-windows.ps1
 ```
 
-The self-contained x64 app is written to `build\windows\win-x64`, and the portable archive is written to `outputs\Codex-Meter-Windows-x64-v1.4.0.zip`. Extract the archive and run `Codex Meter.exe`; installation and administrator access are not required.
+The self-contained x64 app is written to `build\windows\win-x64`, and the graphical installer is written to `outputs\Codex-Meter-Windows-x64-v1.4.1.exe`. Open the EXE to install Codex Meter for the current Windows account. The installer adds the app to the Start menu and registers it with Windows **Installed apps** for upgrades and removal.
 
 ## Embeddable web component
 

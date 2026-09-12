@@ -175,7 +175,7 @@ internal sealed class CodexUsageService : IDisposable
                 {
                     ["name"] = "codex_usage_widget",
                     ["title"] = "Codex Meter",
-                    ["version"] = "1.4.0"
+                    ["version"] = "1.4.1"
                 }
             }
         });

@@ -1,0 +1,154 @@
+<Window x:Class="CodexMeter.Installer.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Codex Meter 安装程序"
+        Icon="Assets/AppIcon.ico"
+        Width="780"
+        Height="510"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        AllowsTransparency="True"
+        Background="Transparent"
+        WindowStartupLocation="CenterScreen">
+  <Grid Margin="20">
+    <Border CornerRadius="26"
+            Background="{DynamicResource WindowBackground}"
+            BorderBrush="{DynamicResource CardBorder}"
+            BorderThickness="1"
+            ClipToBounds="True">
+      <Border.Effect>
+        <DropShadowEffect BlurRadius="32" ShadowDepth="8" Opacity="0.24" Color="#172038" />
+      </Border.Effect>
+      <Grid>
+        <Ellipse Width="370" Height="370" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-230,-160,0" Opacity="0.28">
+          <Ellipse.Fill>
+            <RadialGradientBrush>
+              <GradientStop Color="#8FA4FF" Offset="0" />
+              <GradientStop Color="#008FA4FF" Offset="1" />
+            </RadialGradientBrush>
+          </Ellipse.Fill>
+        </Ellipse>
+        <Ellipse Width="320" Height="320" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="-190,0,0,-220" Opacity="0.22">
+          <Ellipse.Fill>
+            <RadialGradientBrush>
+              <GradientStop Color="#68DABF" Offset="0" />
+              <GradientStop Color="#0068DABF" Offset="1" />
+            </RadialGradientBrush>
+          </Ellipse.Fill>
+        </Ellipse>
+
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="58" />
+            <RowDefinition Height="*" />
+          </Grid.RowDefinitions>
+
+          <Grid Grid.Row="0" Background="#01000000" MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+            <StackPanel Orientation="Horizontal" Margin="22,0" VerticalAlignment="Center">
+              <Image Source="Assets/AppIcon.ico" Width="28" Height="28" />
+              <TextBlock Text="Codex Meter" Margin="10,0,0,0" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" />
+              <Border Margin="9,0,0,0" CornerRadius="6" Background="#176F61E8" Padding="7,3">
+                <TextBlock Text="SETUP" Foreground="#7567E8" FontSize="9" FontWeight="Bold" />
+              </Border>
+            </StackPanel>
+            <Button x:Name="CloseButton" Width="38" Height="38" Margin="0,0,12,0" HorizontalAlignment="Right" VerticalAlignment="Center"
+                    Style="{StaticResource CloseButtonStyle}" Click="CloseButton_Click" />
+          </Grid>
+
+          <Grid Grid.Row="1" Margin="16,0,16,16">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="278" />
+              <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Border CornerRadius="20" Padding="30" Margin="0,0,16,0">
+              <Border.Background>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                  <GradientStop Color="#5545DA" Offset="0" />
+                  <GradientStop Color="#7566ED" Offset="0.58" />
+                  <GradientStop Color="#5CBBC5" Offset="1" />
+                </LinearGradientBrush>
+              </Border.Background>
+              <Grid ClipToBounds="True">
+                <Ellipse Width="210" Height="210" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,-115,-125" Stroke="#35FFFFFF" StrokeThickness="24" />
+                <Ellipse Width="130" Height="130" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="-85,-70,0,0" Stroke="#24FFFFFF" StrokeThickness="18" />
+                <StackPanel VerticalAlignment="Center">
+                  <Border Width="66" Height="66" CornerRadius="18" Background="#25FFFFFF" HorizontalAlignment="Left" Margin="0,0,0,24">
+                    <Image Source="Assets/AppIcon.ico" Width="48" Height="48" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                  </Border>
+                  <TextBlock Text="专注创作，" Foreground="White" FontSize="28" FontWeight="SemiBold" />
+                  <TextBlock Text="用量一目了然。" Foreground="White" FontSize="28" FontWeight="SemiBold" Margin="0,2,0,0" />
+                  <TextBlock Text="轻巧、安静的 Codex 用量浮窗" Foreground="#D9FFFFFF" FontSize="13" Margin="0,18,0,0" />
+                </StackPanel>
+              </Grid>
+            </Border>
+
+            <Grid Grid.Column="1" Margin="24,12,24,18">
+              <Grid x:Name="WelcomePanel">
+                <Grid.RowDefinitions>
+                  <RowDefinition Height="Auto" />
+                  <RowDefinition Height="Auto" />
+                  <RowDefinition Height="*" />
+                  <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <TextBlock x:Name="WelcomeTitle" Text="安装 Codex Meter" FontSize="27" FontWeight="SemiBold" />
+                <TextBlock x:Name="WelcomeSubtitle" Grid.Row="1" Text="只需片刻，即可随时查看 Codex 用量。" Foreground="{DynamicResource SecondaryText}" FontSize="13" Margin="0,8,0,0" />
+                <StackPanel Grid.Row="2" Margin="0,26,0,0">
+                  <Border CornerRadius="15" Background="{DynamicResource CardBackground}" BorderBrush="{DynamicResource CardBorder}" BorderThickness="1" Padding="17,14">
+                    <Grid>
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="36" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                      </Grid.ColumnDefinitions>
+                      <Border Width="28" Height="28" CornerRadius="8" Background="#147968F0">
+                        <TextBlock Text="⌂" Foreground="#7567E8" FontSize="17" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                      </Border>
+                      <StackPanel Grid.Column="1">
+                        <TextBlock x:Name="LocationLabel" Text="安装位置" FontSize="11" Foreground="{DynamicResource MutedText}" />
+                        <TextBlock x:Name="LocationText" FontSize="12" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" Margin="0,3,0,0" />
+                      </StackPanel>
+                      <Button x:Name="BrowseButton" Grid.Column="2" Content="更改" Height="30" MinWidth="54" Margin="10,0,0,0"
+                              Style="{StaticResource SecondaryButtonStyle}" Click="BrowseButton_Click" />
+                    </Grid>
+                  </Border>
+                  <CheckBox x:Name="OptionCheckBox" Content="创建桌面快捷方式" IsChecked="True" Margin="0,16,0,0"
+                            Style="{StaticResource OptionCheckBoxStyle}" />
+                </StackPanel>
+                <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+                  <Button Content="取消" Style="{StaticResource SecondaryButtonStyle}" Click="SecondaryButton_Click" Margin="0,0,10,0" />
+                  <Button x:Name="PrimaryButton" Content="开始安装" Style="{StaticResource PrimaryButtonStyle}" Click="PrimaryButton_Click" />
+                </StackPanel>
+              </Grid>
+
+              <Grid x:Name="ProgressPanel" Visibility="Collapsed">
+                <StackPanel VerticalAlignment="Center">
+                  <Border Width="68" Height="68" CornerRadius="21" Background="#157263EA" HorizontalAlignment="Center">
+                    <Image Source="Assets/AppIcon.ico" Width="46" Height="46" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                  </Border>
+                  <TextBlock x:Name="ProgressTitle" Text="正在安装 Codex Meter" FontSize="25" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,24,0,0" />
+                  <TextBlock x:Name="ProgressStatus" Text="正在准备…" FontSize="13" Foreground="{DynamicResource SecondaryText}" HorizontalAlignment="Center" Margin="0,9,0,0" />
+                  <ProgressBar x:Name="InstallProgress" Height="7" Minimum="0" Maximum="100" Value="5" Margin="36,28" BorderThickness="0" Foreground="#7868EC" Background="{DynamicResource GhostButton}" />
+                </StackPanel>
+              </Grid>
+
+              <Grid x:Name="ResultPanel" Visibility="Collapsed">
+                <StackPanel VerticalAlignment="Center">
+                  <Border x:Name="ResultIcon" Width="74" Height="74" CornerRadius="37" Background="#1768DABF" HorizontalAlignment="Center">
+                    <TextBlock x:Name="ResultGlyph" Text="✓" Foreground="#3DBB99" FontSize="34" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                  </Border>
+                  <TextBlock x:Name="ResultTitle" Text="安装完成" FontSize="27" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,22,0,0" />
+                  <TextBlock x:Name="ResultSubtitle" Text="Codex Meter 已准备就绪。" FontSize="13" Foreground="{DynamicResource SecondaryText}" HorizontalAlignment="Center" TextAlignment="Center" Margin="20,9,20,0" TextWrapping="Wrap" />
+                  <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,30,0,0">
+                    <Button x:Name="ResultSecondaryButton" Content="关闭" Style="{StaticResource SecondaryButtonStyle}" Click="SecondaryButton_Click" Margin="0,0,10,0" />
+                    <Button x:Name="ResultPrimaryButton" Content="立即启动" Style="{StaticResource PrimaryButtonStyle}" Click="ResultPrimaryButton_Click" />
+                  </StackPanel>
+                </StackPanel>
+              </Grid>
+            </Grid>
+          </Grid>
+        </Grid>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>

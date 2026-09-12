@@ -16,7 +16,7 @@ Codex Meter 是一款适用于 macOS 和 Windows 的轻量级 Codex 原生用量
 - 随意拖动紧凑图标，或固定展开面板使其保持打开；固定状态会在重启后保留。
 - 跟随系统外观，或手动选择浅色、深色模式。
 - 在 macOS 和 Windows 上保持悬浮于其他窗口之上。
-- 所有处理均在本机完成，无分析统计、独立后端、凭据存储、登录项或 Codex 生命周期钩子。
+- 所有处理均在本机完成，无分析统计、独立后端、凭据存储或 Codex 生命周期钩子。开机自启动为可选功能，只有在设置中主动开启后才会注册登录项。
 
 ## 如何使用 Codex Meter
 
@@ -26,7 +26,7 @@ Codex Meter 是一款适用于 macOS 和 Windows 的轻量级 Codex 原生用量
 4. 点击 **今日 Tokens** 打开最近 7 天用量图表，或点击 **今日对话** 查看今天的本地对话轮次。
 5. 使用顶部按钮切换主题、立即刷新、固定或取消固定面板、折叠面板或退出应用。
 
-Codex Meter 每分钟自动刷新一次，也会在启动、点击刷新按钮和完成额度重置请求后刷新。当面板未固定时，鼠标移开后会自动折叠；打开的对话框和正在进行的拖动会让面板保持展开。即使图标靠近屏幕边缘，原生宿主也会确保展开后的面板处于当前屏幕的可用区域内。
+Codex Meter 在首次同步成功后每分钟自动刷新一次。刚启动且尚未取得数据时，会快速连续重试，直到数据返回；点击刷新按钮和完成额度重置请求后也会立即刷新。当面板未固定时，鼠标移开后会自动折叠；打开的对话框和正在进行的拖动会让面板保持展开。即使图标靠近屏幕边缘，原生宿主也会确保展开后的面板处于当前屏幕的可用区域内。
 
 ## 各项数据的含义
 
@@ -56,7 +56,7 @@ Codex Meter 无法购买额度或重置次数，也绝不会在后台自动使�
 
 ## 可靠性与本地回退
 
-Codex Meter 会先读取本地会话统计，因此在账户额度仍在同步时，今日活动就可以先行显示。如果账户请求失败，本地 Token 和对话详情仍然可用，面板会显示同步错误，原生宿主会在短暂延迟后自动重试；此后仍会继续进行常规的每分钟刷新。
+Codex Meter 会先读取本地会话统计，因此在账户额度仍在同步时，今日活动就可以先行显示。首次成功取得账户数据之前，原生宿主会持续快速重试。后续账户请求失败时，本地 Token 和对话详情仍然可用，面板会显示同步错误，并在短暂延迟后自动重试；此后仍会继续进行常规的每分钟刷新。
 
 结构化会话文件来自 `~/.codex/sessions`；设置 `CODEX_HOME` 后则读取 `$CODEX_HOME/sessions`。刷新时会缓存未变化的文件。“今日”和日期范围均以设备当前的本地时区为准。
 
@@ -75,10 +75,10 @@ Windows 没有与 macOS“所有 Spaces”对应的稳定公开能力，独占�
 
 ## 下载与安装
 
-- [macOS Apple Silicon 安装包 — Codex Meter v1.4.0](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.0/Codex-Meter-macOS-arm64-v1.4.0.dmg)
-- [Windows 10/11 x64 — Codex Meter v1.4.0](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.0/Codex-Meter-Windows-x64-v1.4.0.zip)
+- [macOS Apple Silicon 安装包 — Codex Meter v1.4.1](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.1/Codex-Meter-macOS-arm64-v1.4.1.dmg)
+- [Windows 10/11 x64 安装包 — Codex Meter v1.4.1](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.1/Codex-Meter-Windows-x64-v1.4.1.exe)
 
-macOS 用户打开下载的 DMG，将 `Codex Meter` 拖到“应用程序”快捷方式，再从“应用程序”中启动。Windows 用户解压后直接运行 `Codex Meter.exe`，无需安装或管理员权限。Intel Mac 用户可以从源码构建安装包。
+macOS 用户打开下载的 DMG，将 `Codex Meter` 拖到“应用程序”快捷方式，再从“应用程序”中启动。Windows 用户打开下载的安装 EXE 并按提示操作；可以选择安装位置以及是否创建桌面快捷方式。应用会添加到开始菜单，也可以从 Windows 的“已安装的应用”中卸载；卸载程序可选择保留或移除 Codex Meter 的本地偏好设置，不会影响 Codex 会话。Intel Mac 用户可以从源码构建安装包。
 
 由于 macOS 应用尚未公证，首次启动时系统可能要求确认。按住 Control 点击应用，选择**打开**，然后再次确认**打开**。
 
@@ -149,7 +149,7 @@ DMG 安装包会生成到 `outputs/Codex-Meter-macOS-<架构>-v<版本>.dmg`，�
 .\scripts\build-windows.ps1
 ```
 
-自包含 x64 应用会生成到 `build\windows\win-x64`，便携压缩包会生成到 `outputs\Codex-Meter-Windows-x64-v1.4.0.zip`。解压后运行 `Codex Meter.exe`；无需安装或管理员权限。
+自包含 x64 应用会生成到 `build\windows\win-x64`，图形化安装程序会生成到 `outputs\Codex-Meter-Windows-x64-v1.4.1.exe`。打开 EXE 即可为当前 Windows 账户安装 Codex Meter。安装程序会将应用添加到开始菜单，并在 Windows“已安装的应用”中注册升级和卸载入口。
 
 ## 可嵌入的 Web 组件
 

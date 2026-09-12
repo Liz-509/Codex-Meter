@@ -23,6 +23,7 @@ public partial class MainWindow : Window
     private const int PbtPowerSettingChange = 0x8013;
     private const int DeviceNotifyWindowHandle = 0;
     private const int HtCaption = 0x0002;
+    private static readonly TimeSpan StartupRetryDelay = TimeSpan.FromMilliseconds(500);
     private static readonly Guid SessionDisplayStatus = new("2B84C20E-AD23-4DDF-93DB-05FFBD7EFCA5");
     private static readonly TimeSpan[] RetryDelays =
     [
@@ -32,6 +33,8 @@ public partial class MainWindow : Window
     ];
 
     private readonly CodexUsageService _usageService = new();
+    private readonly LaunchAtLoginService _launchAtLoginService = new(
+        Environment.ProcessPath ?? throw new InvalidOperationException("无法确定应用程序路径。"));
     private readonly DispatcherTimer _refreshTimer;
     private readonly CancellationTokenSource _lifetime = new();
     private Forms.NotifyIcon? _trayIcon;
@@ -41,6 +44,7 @@ public partial class MainWindow : Window
     private bool _refreshAfterReset;
     private bool _isExiting;
     private bool _webReady;
+    private bool _hasReceivedUsage;
     private int _retryAttempt;
     private System.Windows.Point? _compactOrigin;
     private HwndSource? _windowSource;
@@ -86,7 +90,6 @@ public partial class MainWindow : Window
         try
         {
             await InitializeWebViewAsync();
-            _refreshTimer.Start();
         }
         catch (WebView2RuntimeNotFoundException)
         {
@@ -140,6 +143,12 @@ public partial class MainWindow : Window
               },
               beginDrag(payload) {
                 window.chrome.webview.postMessage({ action: 'beginDrag', ...payload });
+              },
+              getLaunchAtLogin() {
+                window.chrome.webview.postMessage({ action: 'getLaunchAtLogin' });
+              },
+              setLaunchAtLogin(payload) {
+                window.chrome.webview.postMessage({ action: 'setLaunchAtLogin', enabled: payload?.enabled === true });
               }
             };
             """);
@@ -189,6 +198,14 @@ public partial class MainWindow : Window
                 case "beginDrag":
                     BeginNativeDrag(root);
                     break;
+                case "getLaunchAtLogin":
+                    await DeliverLaunchAtLoginResultAsync();
+                    break;
+                case "setLaunchAtLogin":
+                    var enabled = root.TryGetProperty("enabled", out var enabledValue) &&
+                        enabledValue.ValueKind is JsonValueKind.True;
+                    await SetLaunchAtLoginAsync(enabled);
+                    break;
                 case "quit":
                     ExitApplication();
                     break;
@@ -214,7 +231,13 @@ public partial class MainWindow : Window
 
             if (payload["error"] is null)
             {
+                _hasReceivedUsage = true;
                 _retryAttempt = 0;
+                if (!_refreshTimer.IsEnabled) _refreshTimer.Start();
+            }
+            else if (!_hasReceivedUsage)
+            {
+                ScheduleStartupRetry();
             }
             else
             {
@@ -278,6 +301,38 @@ public partial class MainWindow : Window
         await Browser.CoreWebView2.ExecuteScriptAsync($"window.codexResetResult?.({json});");
     }
 
+    private async Task DeliverLaunchAtLoginResultAsync(string? error = null)
+    {
+        if (!_webReady || Browser.CoreWebView2 is null) return;
+        bool enabled;
+        try
+        {
+            enabled = _launchAtLoginService.IsEnabled();
+        }
+        catch (Exception exception)
+        {
+            enabled = false;
+            error ??= exception.Message;
+        }
+
+        var payload = JsonSerializer.Serialize(new { supported = true, enabled, error });
+        await Browser.CoreWebView2.ExecuteScriptAsync($"window.codexLaunchAtLoginResult?.({payload});");
+    }
+
+    private async Task SetLaunchAtLoginAsync(bool enabled)
+    {
+        string? error = null;
+        try
+        {
+            _launchAtLoginService.SetEnabled(enabled);
+        }
+        catch (Exception exception)
+        {
+            error = exception.Message;
+        }
+        await DeliverLaunchAtLoginResultAsync(error);
+    }
+
     private Task DeliverOnDispatcherAsync(JsonObject payload)
     {
         if (Dispatcher.CheckAccess()) return DeliverAsync(payload);
@@ -293,6 +348,8 @@ public partial class MainWindow : Window
         var delay = RetryDelays[_retryAttempt++];
         _ = RetryAfterDelayAsync(delay);
     }
+
+    private void ScheduleStartupRetry() => _ = RetryAfterDelayAsync(StartupRetryDelay);
 
     private async Task RetryAfterDelayAsync(TimeSpan delay)
     {

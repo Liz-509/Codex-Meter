@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import WebKit
 
 final class FloatingPanel: NSPanel {
@@ -127,6 +128,8 @@ final class PanelBridge: NSObject, WKScriptMessageHandler {
     weak var panel: NSPanel?
     var onUsageRequested: (() -> Void)?
     var onResetRequested: (() -> Void)?
+    var onLaunchAtLoginStatusRequested: (() -> Void)?
+    var onLaunchAtLoginChangeRequested: ((Bool) -> Void)?
     private var compactFrame: NSRect?
 
     func prepareForDrag() {
@@ -169,6 +172,17 @@ final class PanelBridge: NSObject, WKScriptMessageHandler {
         if body["action"] as? String == "consumeReset",
            body["confirmed"] as? Bool == true {
             onResetRequested?()
+            return
+        }
+
+        if body["action"] as? String == "getLaunchAtLogin" {
+            onLaunchAtLoginStatusRequested?()
+            return
+        }
+
+        if body["action"] as? String == "setLaunchAtLogin",
+           let enabled = body["enabled"] as? Bool {
+            onLaunchAtLoginChangeRequested?(enabled)
             return
         }
 
@@ -258,6 +272,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private var isResetting = false
     private var refreshAfterReset = false
     private var refreshTimer: Timer?
+    private var hasReceivedUsage = false
     private var retryAttempt = 0
     private var retryWorkItem: DispatchWorkItem?
     private let bridge = PanelBridge()
@@ -279,9 +294,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         }
         createPanel()
         observeLifecycle()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            self?.refreshUsage()
-        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -337,6 +349,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
           },
           quit() {
             window.webkit.messageHandlers.panel.postMessage({ action: 'quit' });
+          },
+          getLaunchAtLogin() {
+            window.webkit.messageHandlers.panel.postMessage({ action: 'getLaunchAtLogin' });
+          },
+          setLaunchAtLogin(payload) {
+            window.webkit.messageHandlers.panel.postMessage({ action: 'setLaunchAtLogin', enabled: payload?.enabled === true });
           }
         };
         """
@@ -402,6 +420,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         bridge.panel = panel
         bridge.onUsageRequested = { [weak self] in self?.refreshUsage() }
         bridge.onResetRequested = { [weak self] in self?.consumeResetCredit() }
+        bridge.onLaunchAtLoginStatusRequested = { [weak self] in self?.deliverLaunchAtLoginResult() }
+        bridge.onLaunchAtLoginChangeRequested = { [weak self] enabled in self?.setLaunchAtLogin(enabled) }
         self.webView = webView
         panel.orderFrontRegardless()
         self.panel = panel
@@ -463,9 +483,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
                 return
             }
             if payload["error"] != nil {
-                self.scheduleRetry()
+                if self.hasReceivedUsage {
+                    self.scheduleRetry()
+                } else {
+                    self.scheduleStartupRetry()
+                }
             } else {
+                self.hasReceivedUsage = true
                 self.retryAttempt = 0
+                self.startRefreshTimerIfNeeded()
             }
         }
     }
@@ -500,6 +526,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         webView?.evaluateJavaScript("window.codexResetResult?.(\(json));")
     }
 
+    private func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+            deliverLaunchAtLoginResult()
+        } catch {
+            deliverLaunchAtLoginResult(error: error.localizedDescription)
+        }
+    }
+
+    private func deliverLaunchAtLoginResult(error: String? = nil) {
+        let status = SMAppService.mainApp.status
+        var statusMessage = error
+        if statusMessage == nil && status == .requiresApproval {
+            statusMessage = "请在系统设置的“登录项”中允许 Codex Meter"
+        }
+        var payload: [String: Any] = [
+            "supported": true,
+            "enabled": status == .enabled
+        ]
+        if let statusMessage {
+            payload["error"] = statusMessage
+        } else {
+            payload["error"] = NSNull()
+        }
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView?.evaluateJavaScript("window.codexLaunchAtLoginResult?.(\(json));")
+    }
+
     private func scheduleRetry() {
         let delays: [TimeInterval] = [2, 5, 10]
         guard retryAttempt < delays.count else { return }
@@ -510,6 +570,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         }
         retryWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func scheduleStartupRetry() {
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.refreshUsage()
+        }
+        retryWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
+    }
+
+    private func startRefreshTimerIfNeeded() {
+        guard refreshTimer == nil else { return }
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.refreshUsage()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

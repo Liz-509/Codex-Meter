@@ -2,6 +2,7 @@ const ICONS = {
   spark: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8c.5 4.9 4.3 8.7 9.2 9.2-4.9.5-8.7 4.3-9.2 9.2-.5-4.9-4.3-8.7-9.2-9.2 4.9-.5 8.7-4.3 9.2-9.2Z"/></svg>`,
   sun: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.6"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg>`,
   moon: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.2 15.1A8.5 8.5 0 0 1 8.9 3.8a8.5 8.5 0 1 0 11.3 11.3Z"/></svg>`,
+  settings: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.86 2.86-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21H9.55v-.09A1.7 1.7 0 0 0 8.5 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.86-2.86.06-.06A1.7 1.7 0 0 0 4.1 15a1.7 1.7 0 0 0-1.6-1H2.4V10h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.34-1.88l-.06-.06L6.56 4.2l.06.06A1.7 1.7 0 0 0 8.5 4.6a1.7 1.7 0 0 0 1-1.6v-.1h4.05V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.86 2.86-.06.06A1.7 1.7 0 0 0 19 9a1.7 1.7 0 0 0 1.6 1h.1v4h-.1a1.7 1.7 0 0 0-1.2 1Z"/></svg>`,
   refresh: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5"/><path d="M18.1 9A7 7 0 0 0 6.5 6.5L4 11m16 2-2.5 4.5A7 7 0 0 1 5.9 15"/></svg>`,
   pin: `<svg viewBox="0 0 24 24" aria-hidden="true"><path class="pin-body" d="M7 3v5l-2 4v2h14v-2l-2-4V3"/><path d="M5 3h14M12 14v8"/></svg>`,
   chevron: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg>`,
@@ -64,6 +65,16 @@ const hostBridge = {
     }
     return false;
   },
+  getLaunchAtLogin() {
+    if (!window.codexMeterBridge?.getLaunchAtLogin) return false;
+    window.codexMeterBridge.getLaunchAtLogin();
+    return true;
+  },
+  setLaunchAtLogin(enabled) {
+    if (!window.codexMeterBridge?.setLaunchAtLogin) return false;
+    window.codexMeterBridge.setLaunchAtLogin({ enabled });
+    return true;
+  },
 };
 
 class CodexUsageWidget extends HTMLElement {
@@ -85,6 +96,10 @@ class CodexUsageWidget extends HTMLElement {
     this.suppressHoverUntilLeave = false;
     this.suppressHoverTimer = null;
     this.activeDialog = null;
+    this.launchAtLogin = false;
+    this.launchAtLoginSupported = Boolean(window.codexMeterBridge?.getLaunchAtLogin);
+    this.launchAtLoginLoading = false;
+    this.launchAtLoginMessage = "";
     this.expandedConversationGroups = new Set();
     this.pointerInside = false;
     this.resetting = false;
@@ -368,6 +383,10 @@ class CodexUsageWidget extends HTMLElement {
     this.shadowRoot.addEventListener("click", (event) => {
       const action = event.target.closest("[data-action]")?.dataset.action;
       if (action === "theme") this.cycleTheme();
+      if (action === "settings") {
+        this.openDialog("settings");
+        this.requestLaunchAtLoginState();
+      }
       if (action === "refresh") this.refresh();
       if (action === "pin") this.togglePinned();
       if (action === "close") hostBridge.quit();
@@ -380,6 +399,7 @@ class CodexUsageWidget extends HTMLElement {
       }
       if (action === "close-dialog" || action === "cancel-reset") this.closeDialog();
       if (action === "confirm-reset") this.confirmReset();
+      if (action === "toggle-startup") this.setLaunchAtLogin(!this.launchAtLogin);
       if (action === "collapse") {
         this.collapsed = !this.collapsed;
         localStorage.setItem("codex-widget-collapsed", String(this.collapsed));
@@ -441,6 +461,51 @@ class CodexUsageWidget extends HTMLElement {
   openResetDialog() {
     if (this.resetting || !(this.data.resetCredits > 0)) return;
     this.openDialog("reset", "[data-action='cancel-reset']");
+  }
+
+  requestLaunchAtLoginState() {
+    this.launchAtLoginLoading = true;
+    this.launchAtLoginMessage = "正在读取系统设置…";
+    this.renderLaunchAtLoginSetting();
+    if (!hostBridge.getLaunchAtLogin()) {
+      this.handleLaunchAtLoginResult({ supported: false });
+    }
+  }
+
+  setLaunchAtLogin(enabled) {
+    if (this.launchAtLoginLoading || !this.launchAtLoginSupported) return;
+    this.launchAtLoginLoading = true;
+    this.launchAtLoginMessage = enabled ? "正在开启…" : "正在关闭…";
+    this.renderLaunchAtLoginSetting();
+    if (!hostBridge.setLaunchAtLogin(enabled)) {
+      this.handleLaunchAtLoginResult({ supported: false });
+    }
+  }
+
+  handleLaunchAtLoginResult(payload = {}) {
+    this.launchAtLoginLoading = false;
+    this.launchAtLoginSupported = payload.supported !== false;
+    if (typeof payload.enabled === "boolean") this.launchAtLogin = payload.enabled;
+    this.launchAtLoginMessage = payload.error || (
+      this.launchAtLoginSupported
+        ? (this.launchAtLogin ? "已开启" : "已关闭")
+        : "仅桌面版支持此设置"
+    );
+    this.renderLaunchAtLoginSetting();
+  }
+
+  renderLaunchAtLoginSetting() {
+    const toggle = this.shadowRoot.querySelector("[data-action='toggle-startup']");
+    const status = this.shadowRoot.querySelector(".setting-status");
+    if (toggle) {
+      toggle.setAttribute("aria-checked", String(this.launchAtLogin));
+      toggle.disabled = this.launchAtLoginLoading || !this.launchAtLoginSupported;
+    }
+    if (status) {
+      status.textContent = this.launchAtLoginMessage;
+      const normalMessages = ["已开启", "已关闭", "正在开启…", "正在关闭…", "正在读取系统设置…"];
+      status.classList.toggle("is-error", Boolean(this.launchAtLoginMessage && this.launchAtLoginSupported && !normalMessages.includes(this.launchAtLoginMessage)));
+    }
   }
 
   openDialog(kind, focusSelector = "[data-action='close-dialog']") {
@@ -913,6 +978,7 @@ class CodexUsageWidget extends HTMLElement {
             <div><strong>Codex Meter</strong><span class="plan">${this.data.plan}</span></div>
           </div>
           <div class="actions">
+            <button data-action="settings" aria-label="打开设置" title="设置">${ICONS.settings}</button>
             <button data-action="theme" aria-label="切换主题" title="切换主题">${ICONS.moon}</button>
             <button data-action="refresh" aria-label="刷新数据" title="刷新数据">${ICONS.refresh}</button>
             <button class="native-pin" data-action="pin" aria-label="${this.pinned ? "取消固定面板" : "固定面板"}" aria-pressed="${this.pinned}" title="${this.pinned ? "取消固定面板" : "固定面板"}">${ICONS.pin}</button>
@@ -965,6 +1031,24 @@ class CodexUsageWidget extends HTMLElement {
               <button class="dialog-dismiss" data-action="close-dialog" type="button" aria-label="关闭用量图表">${ICONS.close}</button>
             </div>
             <div class="token-chart"></div>
+          </div>
+        </div>
+        <div class="app-dialog" data-dialog="settings" role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title" hidden>
+          <div class="dialog-card settings-dialog-card">
+            <div class="dialog-heading">
+              <div><strong id="settings-dialog-title">设置</strong><span class="dialog-subtitle">Codex Meter 偏好设置</span></div>
+              <button class="dialog-dismiss" data-action="close-dialog" type="button" aria-label="关闭设置">${ICONS.close}</button>
+            </div>
+            <div class="settings-list">
+              <div class="setting-row">
+                <div class="setting-copy">
+                  <strong>开机自启动</strong>
+                  <span>登录系统后自动启动 Codex Meter</span>
+                  <span class="setting-status"></span>
+                </div>
+                <button class="setting-switch" data-action="toggle-startup" type="button" role="switch" aria-label="开机自启动" aria-checked="false"><span></span></button>
+              </div>
+            </div>
           </div>
         </div>
         <div class="app-dialog" data-dialog="conversations" role="dialog" aria-modal="true" aria-labelledby="conversation-dialog-title" hidden>
@@ -1022,6 +1106,7 @@ class CodexUsageWidget extends HTMLElement {
       button:hover { color:var(--text); background:var(--panel); }
       button svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; pointer-events:none; transition:transform .18s ease; }
       [data-action="theme"]:hover svg { animation:theme-orbit .52s cubic-bezier(.22,.9,.3,1); }
+      [data-action="settings"]:hover svg { transform:rotate(35deg); }
       [data-action="refresh"]:hover svg { animation:refresh-turn .72s linear infinite; }
       [data-action="pin"] .pin-body { fill:currentColor; fill-opacity:0; transition:fill-opacity .16s ease; }
       [data-action="pin"]:hover svg { transform:rotate(-10deg); }
@@ -1110,6 +1195,20 @@ class CodexUsageWidget extends HTMLElement {
       .dialog-heading strong { font-size:16px; letter-spacing:-.025em; }
       .dialog-subtitle { margin-top:4px; color:var(--muted); font-size:10px; }
       .dialog-dismiss { flex:0 0 auto; margin:-5px -5px 0 0; }
+      .settings-dialog-card { min-height:180px; }
+      .settings-list { margin-top:18px; }
+      .setting-row { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:14px; border:1px solid var(--line); border-radius:15px; background:var(--panel); }
+      .setting-copy { min-width:0; display:flex; flex-direction:column; }
+      .setting-copy strong { font-size:12px; letter-spacing:-.015em; }
+      .setting-copy > span { margin-top:5px; color:var(--muted); font-size:9px; line-height:1.35; }
+      .setting-copy .setting-status { min-height:12px; margin-top:7px; color:#7469ea; font-weight:650; }
+      .setting-copy .setting-status.is-error { color:#e95564; }
+      .setting-switch { position:relative; width:38px; height:22px; flex:0 0 auto; border-radius:12px; background:rgba(120,126,147,.22); }
+      .setting-switch:hover { background:rgba(120,126,147,.3); }
+      .setting-switch span { position:absolute; top:3px; left:3px; width:16px; height:16px; border-radius:50%; background:white; box-shadow:0 1px 4px rgba(25,30,48,.28); transition:transform .18s cubic-bezier(.2,.8,.2,1); }
+      .setting-switch[aria-checked="true"] { background:linear-gradient(135deg,#6559df,#8278ef); }
+      .setting-switch[aria-checked="true"] span { transform:translateX(16px); }
+      .setting-switch:disabled { cursor:wait; opacity:.55; }
       .token-chart { height:260px; min-height:0; display:flex; align-items:stretch; justify-content:space-between; gap:5px; margin-top:19px; padding-top:18px; }
       .chart-column { min-width:0; flex:1 1 0; display:grid; grid-template-rows:18px minmax(0,1fr) 18px; align-items:end; text-align:center; }
       .chart-value { overflow:hidden; color:var(--muted); font-size:8px; font-weight:650; text-overflow:ellipsis; white-space:nowrap; }
@@ -1158,6 +1257,7 @@ customElements.define("codex-usage-widget", CodexUsageWidget);
 // Host integration helpers:
 window.updateCodexUsage = (payload) => document.querySelector("codex-usage-widget")?.updateUsage(payload);
 window.codexResetResult = (payload) => document.querySelector("codex-usage-widget")?.handleResetResult(payload);
+window.codexLaunchAtLoginResult = (payload) => document.querySelector("codex-usage-widget")?.handleLaunchAtLoginResult(payload);
 window.recordCodexTurn = (usage) => document.querySelector("codex-usage-widget")?.recordTurn(usage);
 window.codexUsageSetPanelAnchor = (payload) => document.querySelector("codex-usage-widget")?.setPanelAnchor(payload);
 window.codexUsageSetHostActive = (active) => document.querySelector("codex-usage-widget")?.setHostActive(active);

@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 env:
-  RELEASE_VERSION: "1.4.0"
+  RELEASE_VERSION: "1.4.1"
 
 jobs:
   widget:
@@ -51,26 +51,80 @@ jobs:
         run: dotnet restore windows/CodexMeter.Windows.Tests/CodexMeter.Windows.Tests.csproj
       - name: Run tests
         run: dotnet test windows/CodexMeter.Windows.Tests/CodexMeter.Windows.Tests.csproj --configuration Release --no-restore
-      - name: Build portable package
+      - name: Build installer
         shell: pwsh
         run: ./scripts/build-windows.ps1 -Version $env:RELEASE_VERSION
-      - name: Smoke test packaged app
+      - name: Smoke test installer payload
         shell: pwsh
         run: |
-          $smokeDirectory = Join-Path $env:RUNNER_TEMP "codex-meter-smoke"
-          Expand-Archive "outputs/Codex-Meter-Windows-x64-v$($env:RELEASE_VERSION).zip" $smokeDirectory
+          $installer = "outputs/Codex-Meter-Windows-x64-v$($env:RELEASE_VERSION).exe"
           $process = Start-Process `
-            -FilePath (Join-Path $smokeDirectory "Codex Meter.exe") `
+            -FilePath $installer `
             -ArgumentList "--self-test" `
             -Wait `
             -PassThru
           if ($process.ExitCode -ne 0) {
             throw "Packaged app smoke test failed with exit code $($process.ExitCode)"
           }
+          $installDirectory = Join-Path $env:RUNNER_TEMP "Codex Meter"
+          $env:CODEX_METER_INSTALL_DIRECTORY = $installDirectory
+          $process = Start-Process `
+            -FilePath $installer `
+            -ArgumentList "--quiet-install" `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Installer test installation failed with exit code $($process.ExitCode)"
+          }
+          $installedApp = Join-Path $installDirectory "Codex Meter.exe"
+          $uninstaller = Join-Path $installDirectory "Codex Meter Uninstaller.exe"
+          $shortcut = Join-Path `
+            ([Environment]::GetFolderPath([Environment+SpecialFolder]::Programs)) `
+            "Codex Meter\Codex Meter.lnk"
+          $desktopDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::DesktopDirectory)
+          if ([string]::IsNullOrWhiteSpace($desktopDirectory)) {
+            $desktopDirectory = [Environment]::ExpandEnvironmentVariables(
+              (Get-ItemPropertyValue `
+                -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" `
+                -Name "Desktop")
+            )
+          }
+          $desktopShortcut = Join-Path $desktopDirectory "Codex Meter.lnk"
+          $registeredLocation = Get-ItemPropertyValue `
+            -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexMeter" `
+            -Name "InstallLocation"
+          if (-not (Test-Path $installedApp) -or -not (Test-Path $uninstaller)) {
+            throw "Installer did not create the expected application files"
+          }
+          if (-not (Test-Path $shortcut) -or -not (Test-Path $desktopShortcut) -or $registeredLocation -ne $installDirectory) {
+            throw "Installer did not register the selected installation location"
+          }
+          $settingsDirectory = Join-Path $env:LOCALAPPDATA "Codex Meter"
+          New-Item -ItemType Directory -Path $settingsDirectory -Force | Out-Null
+          Set-Content -LiteralPath (Join-Path $settingsDirectory "installer-test.marker") -Value "test"
+          $env:CODEX_METER_PRESERVE_SETTINGS = "0"
+          $process = Start-Process `
+            -FilePath $uninstaller `
+            -ArgumentList "--quiet-uninstall" `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Installer test uninstall failed with exit code $($process.ExitCode)"
+          }
+          for ($attempt = 0; $attempt -lt 40; $attempt++) {
+            if (-not (Test-Path $installDirectory) -and -not (Test-Path $settingsDirectory)) {
+              break
+            }
+            Start-Sleep -Milliseconds 250
+          }
+          if ((Test-Path $installDirectory) -or (Test-Path $settingsDirectory) -or
+              (Test-Path $shortcut) -or (Test-Path $desktopShortcut)) {
+            throw "Installer test uninstall left application files, settings, or shortcuts behind"
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: Codex-Meter-Windows-x64-v${{ env.RELEASE_VERSION }}
-          path: outputs/Codex-Meter-Windows-x64-v${{ env.RELEASE_VERSION }}.zip
+          path: outputs/Codex-Meter-Windows-x64-v${{ env.RELEASE_VERSION }}.exe
           if-no-files-found: error
 
   release:
@@ -101,6 +155,6 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             "release-artifacts/Codex-Meter-macOS-arm64-v${RELEASE_VERSION}.dmg" \
-            "release-artifacts/Codex-Meter-Windows-x64-v${RELEASE_VERSION}.zip" \
+            "release-artifacts/Codex-Meter-Windows-x64-v${RELEASE_VERSION}.exe" \
             --title "Codex Meter ${GITHUB_REF_NAME}" \
-            --notes "性能与稳定性更新：降低折叠和后台状态下的资源占用，复用 Codex App Server 连接并增强失败恢复，过滤内部 guardian 会话，同时改进 Windows WebView 与系统休眠/锁屏状态处理。"
+            --notes "新增可选的开机自启动设置与 Windows 图形化安装/卸载程序；改进首次同步重试、面板固定体验和跨平台构建流程，并补充中英文文档。"

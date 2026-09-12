@@ -1,0 +1,143 @@
+<Application x:Class="CodexMeter.Installer.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             ShutdownMode="OnMainWindowClose">
+  <Application.Resources>
+    <SolidColorBrush x:Key="WindowBackground" Color="#F8FAFF" />
+    <SolidColorBrush x:Key="CardBackground" Color="#DFFFFFFF" />
+    <SolidColorBrush x:Key="CardBorder" Color="#1A69758D" />
+    <SolidColorBrush x:Key="PrimaryText" Color="#152037" />
+    <SolidColorBrush x:Key="SecondaryText" Color="#69758A" />
+    <SolidColorBrush x:Key="MutedText" Color="#8994A9" />
+    <SolidColorBrush x:Key="GhostButton" Color="#0D69758D" />
+
+    <Style TargetType="TextBlock">
+      <Setter Property="FontFamily" Value="Segoe UI Variable Display" />
+      <Setter Property="Foreground" Value="{DynamicResource PrimaryText}" />
+    </Style>
+
+    <Style x:Key="PrimaryButtonStyle" TargetType="Button">
+      <Setter Property="Height" Value="46" />
+      <Setter Property="MinWidth" Value="138" />
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="FontFamily" Value="Segoe UI Variable Text" />
+      <Setter Property="FontSize" Value="14" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="ButtonBorder" CornerRadius="13" Padding="22,0">
+              <Border.Background>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                  <GradientStop Color="#6856EA" Offset="0" />
+                  <GradientStop Color="#8C7CF5" Offset="1" />
+                </LinearGradientBrush>
+              </Border.Background>
+              <TextBlock Text="{TemplateBinding Content}" Foreground="{TemplateBinding Foreground}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.9" />
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.78" />
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.48" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="SecondaryButtonStyle" TargetType="Button">
+      <Setter Property="Height" Value="46" />
+      <Setter Property="MinWidth" Value="92" />
+      <Setter Property="Foreground" Value="{DynamicResource SecondaryText}" />
+      <Setter Property="Background" Value="{DynamicResource GhostButton}" />
+      <Setter Property="FontFamily" Value="Segoe UI Variable Text" />
+      <Setter Property="FontSize" Value="14" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="ButtonBorder" CornerRadius="13" Background="{TemplateBinding Background}" Padding="20,0">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" TextElement.Foreground="{TemplateBinding Foreground}" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.72" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="CloseButtonStyle" TargetType="Button">
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="ButtonBorder" CornerRadius="12" Background="{DynamicResource GhostButton}">
+              <Path Width="10" Height="10" Stretch="Fill" Stroke="{DynamicResource SecondaryText}" StrokeThickness="1.5"
+                    Data="M 0,0 L 10,10 M 10,0 L 0,10" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.7" />
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.35" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="OptionCheckBoxStyle" TargetType="CheckBox">
+      <Setter Property="Foreground" Value="{DynamicResource PrimaryText}" />
+      <Setter Property="FontFamily" Value="Segoe UI Variable Text" />
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="CheckBox">
+            <Border x:Name="OptionCard" CornerRadius="14" Background="{DynamicResource CardBackground}"
+                    BorderBrush="{DynamicResource CardBorder}" BorderThickness="1" Padding="15,13">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="28" />
+                  <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Border x:Name="CheckBoxBorder" Width="20" Height="20" CornerRadius="6"
+                        BorderBrush="#7768EC" BorderThickness="1.5" Background="Transparent">
+                  <Path x:Name="CheckMark" Width="10" Height="7" Stretch="Fill" Stroke="White" StrokeThickness="2"
+                        StrokeStartLineCap="Round" StrokeEndLineCap="Round" Data="M 0,3.5 L 3.5,7 L 10,0" Visibility="Collapsed" />
+                </Border>
+                <ContentPresenter Grid.Column="1" Margin="8,0,0,0" VerticalAlignment="Center"
+                                  TextElement.Foreground="{TemplateBinding Foreground}" />
+              </Grid>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="CheckBoxBorder" Property="Background" Value="#7768EC" />
+                <Setter TargetName="CheckMark" Property="Visibility" Value="Visible" />
+              </Trigger>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="OptionCard" Property="BorderBrush" Value="#667768EC" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Application.Resources>
+</Application>
