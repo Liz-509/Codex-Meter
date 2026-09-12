@@ -3,6 +3,7 @@ const ICONS = {
   sun: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.6"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg>`,
   moon: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.2 15.1A8.5 8.5 0 0 1 8.9 3.8a8.5 8.5 0 1 0 11.3 11.3Z"/></svg>`,
   refresh: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5"/><path d="M18.1 9A7 7 0 0 0 6.5 6.5L4 11m16 2-2.5 4.5A7 7 0 0 1 5.9 15"/></svg>`,
+  pin: `<svg viewBox="0 0 24 24" aria-hidden="true"><path class="pin-body" d="M7 3v5l-2 4v2h14v-2l-2-4V3"/><path d="M5 3h14M12 14v8"/></svg>`,
   chevron: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg>`,
   close: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>`,
   reset: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>`,
@@ -71,7 +72,8 @@ class CodexUsageWidget extends HTMLElement {
     this.attachShadow({ mode: "open" });
     this.data = structuredClone(DEFAULT_DATA);
     this.autoHover = this.hasAttribute("native");
-    this.collapsed = this.autoHover ? true : localStorage.getItem("codex-widget-collapsed") === "true";
+    this.pinned = this.autoHover && localStorage.getItem("codex-widget-pinned") === "true";
+    this.collapsed = this.autoHover ? !this.pinned : localStorage.getItem("codex-widget-collapsed") === "true";
     this.theme = localStorage.getItem("codex-widget-theme") || "auto";
     this.syncState = "loading";
     this.expandedHeight = 443;
@@ -367,6 +369,7 @@ class CodexUsageWidget extends HTMLElement {
       const action = event.target.closest("[data-action]")?.dataset.action;
       if (action === "theme") this.cycleTheme();
       if (action === "refresh") this.refresh();
+      if (action === "pin") this.togglePinned();
       if (action === "close") hostBridge.quit();
       if (action === "reset-credit") this.openResetDialog();
       if (action === "tokens-detail") this.openDialog("tokens");
@@ -401,6 +404,40 @@ class CodexUsageWidget extends HTMLElement {
     });
   }
 
+  togglePinned() {
+    if (!this.autoHover) return;
+    this.pinned = !this.pinned;
+    localStorage.setItem("codex-widget-pinned", String(this.pinned));
+
+    const button = this.shadowRoot.querySelector("[data-action='pin']");
+    const label = this.pinned ? "取消固定面板" : "固定面板";
+    button?.setAttribute("aria-label", label);
+    button?.setAttribute("aria-pressed", String(this.pinned));
+    button?.setAttribute("title", label);
+
+    if (!this.pinned) {
+      if (!this.pointerInside && !this.activeDialog && !this.resetting && !this.dragging) {
+        this.scheduleHoverCollapse();
+      }
+      return;
+    }
+
+    clearTimeout(this.hoverCloseTimer);
+    clearTimeout(this.collapseResizeTimer);
+    clearTimeout(this.motionSettleTimer);
+    if (!this.collapsed) return;
+
+    this.collapsed = false;
+    const widget = this.shadowRoot.querySelector(".widget");
+    widget?.classList.remove("collapsed", "collapsed-settled");
+    this.beginPanelTransition();
+    this.updateMotionState();
+    requestAnimationFrame(() => {
+      this.syncNativeSize(true);
+      this.animateQuotaFill();
+    });
+  }
+
   openResetDialog() {
     if (this.resetting || !(this.data.resetCredits > 0)) return;
     this.openDialog("reset", "[data-action='cancel-reset']");
@@ -428,7 +465,7 @@ class CodexUsageWidget extends HTMLElement {
     }
     this.activeDialog = null;
     this.shadowRoot.querySelectorAll(".app-dialog").forEach((dialog) => dialog.setAttribute("hidden", ""));
-    if (this.autoHover && !this.pointerInside) this.scheduleHoverCollapse();
+    if (this.autoHover && !this.pinned && !this.pointerInside) this.scheduleHoverCollapse();
   }
 
   confirmReset() {
@@ -653,6 +690,7 @@ class CodexUsageWidget extends HTMLElement {
 
     const leave = () => {
       this.pointerInside = false;
+      if (this.pinned) return;
       if (this.suppressHoverUntilLeave) {
         this.suppressHoverUntilLeave = false;
         clearTimeout(this.suppressHoverTimer);
@@ -668,11 +706,6 @@ class CodexUsageWidget extends HTMLElement {
     window.codexUsageDragStarted = beginDrag;
     window.codexUsageDragEnded = () => {
       this.dragging = false;
-      this.suppressHoverUntilLeave = true;
-      clearTimeout(this.suppressHoverTimer);
-      this.suppressHoverTimer = setTimeout(() => {
-        this.suppressHoverUntilLeave = false;
-      }, 300);
       clearTimeout(this.hoverCloseTimer);
       clearTimeout(this.collapseResizeTimer);
       this.setPanelAnchor({
@@ -681,10 +714,30 @@ class CodexUsageWidget extends HTMLElement {
         pointerX: this.expansionPointer.x,
         pointerY: this.expansionPointer.y,
       });
-      this.collapsed = true;
       const widget = this.shadowRoot.querySelector(".widget");
-      widget?.classList.add("collapsed", "collapsed-settled");
       widget?.classList.remove("dragging");
+
+      if (this.pinned) {
+        this.suppressHoverUntilLeave = false;
+        clearTimeout(this.suppressHoverTimer);
+        this.collapsed = false;
+        widget?.classList.remove("collapsed", "collapsed-settled");
+        this.beginPanelTransition();
+        this.updateMotionState();
+        requestAnimationFrame(() => {
+          this.syncNativeSize(false);
+          this.animateQuotaFill();
+        });
+        return;
+      }
+
+      this.suppressHoverUntilLeave = true;
+      clearTimeout(this.suppressHoverTimer);
+      this.suppressHoverTimer = setTimeout(() => {
+        this.suppressHoverUntilLeave = false;
+      }, 300);
+      this.collapsed = true;
+      widget?.classList.add("collapsed", "collapsed-settled");
       this.updateMotionState();
       this.syncNativeSize(false);
     };
@@ -719,8 +772,9 @@ class CodexUsageWidget extends HTMLElement {
 
   scheduleHoverCollapse() {
     clearTimeout(this.hoverCloseTimer);
+    if (this.pinned) return;
     this.hoverCloseTimer = setTimeout(() => {
-      if (this.collapsed || this.dragging || this.activeDialog || this.pointerInside) return;
+      if (this.pinned || this.collapsed || this.dragging || this.activeDialog || this.pointerInside) return;
       this.collapsed = true;
       const widget = this.shadowRoot.querySelector(".widget");
       widget?.classList.add("collapsed");
@@ -861,6 +915,7 @@ class CodexUsageWidget extends HTMLElement {
           <div class="actions">
             <button data-action="theme" aria-label="切换主题" title="切换主题">${ICONS.moon}</button>
             <button data-action="refresh" aria-label="刷新数据" title="刷新数据">${ICONS.refresh}</button>
+            <button class="native-pin" data-action="pin" aria-label="${this.pinned ? "取消固定面板" : "固定面板"}" aria-pressed="${this.pinned}" title="${this.pinned ? "取消固定面板" : "固定面板"}">${ICONS.pin}</button>
             <button data-action="collapse" aria-label="折叠面板" aria-expanded="${!this.collapsed}" title="折叠">${ICONS.chevron}</button>
             <button class="native-close" data-action="close" aria-label="关闭应用" title="关闭">${ICONS.close}</button>
           </div>
@@ -968,9 +1023,15 @@ class CodexUsageWidget extends HTMLElement {
       button svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; pointer-events:none; transition:transform .18s ease; }
       [data-action="theme"]:hover svg { animation:theme-orbit .52s cubic-bezier(.22,.9,.3,1); }
       [data-action="refresh"]:hover svg { animation:refresh-turn .72s linear infinite; }
+      [data-action="pin"] .pin-body { fill:currentColor; fill-opacity:0; transition:fill-opacity .16s ease; }
+      [data-action="pin"]:hover svg { transform:rotate(-10deg); }
+      [data-action="pin"][aria-pressed="true"] { color:#6f63e6; background:rgba(111,99,230,.13); }
+      [data-action="pin"][aria-pressed="true"] .pin-body { fill-opacity:.18; }
+      [data-action="pin"][aria-pressed="true"] svg { transform:rotate(-12deg) scale(1.04); }
       [data-action="close"]:hover { color:#e95564; background:rgba(233,85,100,.11); }
       [data-action="close"]:hover svg { animation:close-pop .34s cubic-bezier(.2,1.25,.35,1) both; }
-      :host(:not([native])) .native-close { display:none; }
+      :host(:not([native])) .native-close,
+      :host(:not([native])) .native-pin { display:none; }
       .body { padding:18px; max-height:520px; opacity:1; transition:max-height .3s ease,opacity .2s,padding .3s; }
       .collapsed .body { max-height:0; opacity:0; padding-top:0; padding-bottom:0; pointer-events:none; }
       :host([native]) .body { transform:scale(1); transform-origin:var(--expand-x) var(--expand-y); transition:opacity .16s ease .08s,transform .28s cubic-bezier(.2,.8,.2,1); }

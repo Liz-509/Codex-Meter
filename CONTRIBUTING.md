@@ -4,7 +4,7 @@ Issues and pull requests are welcome.
 
 Before submitting a change:
 
-1. Run `scripts/build-native.sh`.
+1. Run `scripts/build-macos.sh` and verify the DMG in `outputs/`.
 2. Run `node --check usage-widget.js` if Node.js is available.
 3. For Windows changes, run `dotnet test windows/CodexMeter.Windows.Tests/CodexMeter.Windows.Tests.csproj` and `scripts/build-windows.ps1` on Windows 10 22H2 or Windows 11.
 4. Open the built app and verify compact, hover, drag, light, and dark states. Shared UI changes must be checked in both WKWebView and WebView2.

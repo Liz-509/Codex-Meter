@@ -30,16 +30,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Build app
-        run: scripts/build-native.sh
-      - name: Package app
-        run: |
-          mkdir -p outputs
-          ditto -c -k --keepParent "build/Codex Meter.app" "outputs/Codex-Meter-macOS-arm64-v${RELEASE_VERSION}.zip"
+      - name: Build installer
+        run: scripts/build-macos.sh "${RELEASE_VERSION}"
       - uses: actions/upload-artifact@v4
         with:
           name: Codex-Meter-macOS-arm64-v${{ env.RELEASE_VERSION }}
-          path: outputs/Codex-Meter-macOS-arm64-v${{ env.RELEASE_VERSION }}.zip
+          path: outputs/Codex-Meter-macOS-arm64-v${{ env.RELEASE_VERSION }}.dmg
           if-no-files-found: error
 
   windows:
@@ -104,7 +100,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
-            "release-artifacts/Codex-Meter-macOS-arm64-v${RELEASE_VERSION}.zip" \
+            "release-artifacts/Codex-Meter-macOS-arm64-v${RELEASE_VERSION}.dmg" \
             "release-artifacts/Codex-Meter-Windows-x64-v${RELEASE_VERSION}.zip" \
             --title "Codex Meter ${GITHUB_REF_NAME}" \
             --notes "性能与稳定性更新：降低折叠和后台状态下的资源占用，复用 Codex App Server 连接并增强失败恢复，过滤内部 guardian 会话，同时改进 Windows WebView 与系统休眠/锁屏状态处理。"
