@@ -246,7 +246,7 @@ internal static class InstallerService
     {
         try
         {
-            using var process = Process.Start(new ProcessStartInfo
+            var startInfo = new ProcessStartInfo
             {
                 FileName = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.System),
@@ -257,7 +257,9 @@ internal static class InstallerService
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 WindowStyle = ProcessWindowStyle.Hidden,
-            });
+            };
+            startInfo.EnvironmentVariables.Remove("PSModulePath");
+            using var process = Process.Start(startInfo);
             if (process is null || !process.WaitForExit(15_000))
             {
                 TryKill(process);
@@ -329,7 +331,7 @@ internal static class InstallerService
     private static void ValidateMicrosoftSignature(string path, string displayName)
     {
         var escapedPath = path.Replace("'", "''");
-        using var process = Process.Start(new ProcessStartInfo
+        var startInfo = new ProcessStartInfo
         {
             FileName = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.System),
@@ -346,7 +348,9 @@ internal static class InstallerService
             RedirectStandardError = true,
             CreateNoWindow = true,
             WindowStyle = ProcessWindowStyle.Hidden,
-        });
+        };
+        startInfo.EnvironmentVariables.Remove("PSModulePath");
+        using var process = Process.Start(startInfo);
         if (process is null || !process.WaitForExit(30_000))
         {
             TryKill(process);
