@@ -56,6 +56,7 @@ jobs:
           dotnet test windows/CodexMeter.Windows.Tests/CodexMeter.Windows.Tests.csproj
           --configuration Release
           --no-restore
+          -p:WindowsAppSdkBootstrapInitialize=false
           --blame-hang
           --blame-hang-timeout 2m
           --logger "console;verbosity=detailed"

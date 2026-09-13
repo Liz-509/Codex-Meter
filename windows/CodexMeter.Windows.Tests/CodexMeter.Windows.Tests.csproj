@@ -19,8 +19,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference
-      Include="..\CodexMeter.Windows\CodexMeter.Windows.csproj"
-      AdditionalProperties="WindowsAppSdkBootstrapInitialize=false" />
+    <ProjectReference Include="..\CodexMeter.Windows\CodexMeter.Windows.csproj" />
   </ItemGroup>
 </Project>
