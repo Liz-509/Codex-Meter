@@ -338,9 +338,12 @@ internal static class InstallerService
                 "powershell.exe"),
             Arguments = "-NoLogo -NoProfile -NonInteractive -Command \"" +
                 "$signature = Get-AuthenticodeSignature -LiteralPath '" + escapedPath + "'; " +
+                "Write-Output ($signature.Status.ToString() + '|' + $signature.SignerCertificate.Subject); " +
                 "if ($signature.Status -eq 'Valid' -and " +
                 "$signature.SignerCertificate.Subject -like '*Microsoft Corporation*') { exit 0 } else { exit 1 }\"",
             UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
             CreateNoWindow = true,
             WindowStyle = ProcessWindowStyle.Hidden,
         });
@@ -351,7 +354,9 @@ internal static class InstallerService
         }
         if (process.ExitCode != 0)
         {
-            throw new InvalidDataException($"{displayName} 未通过 Microsoft 数字签名验证，已停止安装。");
+            var details = process.StandardOutput.ReadToEnd().Trim();
+            if (string.IsNullOrWhiteSpace(details)) details = process.StandardError.ReadToEnd().Trim();
+            throw new InvalidDataException($"{displayName} 未通过 Microsoft 数字签名验证，已停止安装。{(string.IsNullOrWhiteSpace(details) ? string.Empty : $"（{details}）")}");
         }
     }
 
