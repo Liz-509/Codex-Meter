@@ -83,6 +83,11 @@ jobs:
             -Wait `
             -PassThru
           if ($process.ExitCode -ne 0) {
+            $errorLog = Join-Path $env:TEMP "CodexMeterSetup-error.log"
+            if (Test-Path $errorLog) {
+              Write-Host "Installer diagnostic log:"
+              Get-Content -LiteralPath $errorLog
+            }
             throw "Installer test installation failed with exit code $($process.ExitCode)"
           }
           $installedApp = Join-Path $installDirectory "Codex Meter.exe"
