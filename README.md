@@ -10,8 +10,11 @@ Codex Meter is a lightweight native usage widget for Codex on macOS and Windows.
 
 - See the five-hour and weekly Codex limits, including the percentage remaining and the next reset time.
 - Track today's tokens and conversation turns without opening Codex.
-- Open an account-wide seven-day token chart, with local session history filling gaps when account data is unavailable or delayed.
-- Browse today's local conversation turns, grouped by context window and labeled with the corresponding Codex task name when available.
+- Open account-wide 7/30/90-day token trends and heatmaps, with local session history filling gaps when account data is unavailable or delayed.
+- Break down local tokens and turns by project and Codex task, then export a rolling seven-day Markdown or CSV report.
+- On macOS, keep the five-hour allowance in the menu bar, forecast exhaustion from recent pace, and opt into threshold, exhaustion, and recovery notifications.
+- Browse today's local conversation turns, merged by Codex task and labeled with the corresponding task name when available.
+- See the current task's context remaining in a dial beside the five-hour allowance, then open details for recent window occupancy and compaction counts.
 - Redeem an available reset credit after an explicit confirmation. Codex Meter never consumes a credit automatically.
 - Drag the compact icon anywhere, or pin the expanded panel so it stays open. The pin preference is remembered across restarts.
 - Follow the system appearance or select light or dark mode.
@@ -38,9 +41,14 @@ Codex Meter refreshes automatically every minute after its first successful sync
 | Reset credits | Credits currently available to reset a supported rate limit | Codex App Server account data |
 | Today Tokens | Account-wide tokens for the local calendar day when available, otherwise locally recorded structured session usage | Account usage buckets with a local fallback |
 | Today Conversations | User conversation turns started today, with prompt previews and per-turn token totals when present | Local structured session events |
-| Seven-day history | The most recent seven local calendar days, using account buckets where available and local data to fill missing dates | Account usage buckets plus local sessions |
+| 7/30/90-day trends | The most recent 90 local calendar days with selectable ranges, using account buckets where available and local data to fill missing dates | Account usage buckets plus local sessions |
+| Projects and tasks | Tokens, turns, and activity grouped from this computer's session working directories and task identifiers | Local session metadata |
+| Usage forecast | A trend estimate derived from remaining-percentage observations in the current quota cycle | Lightweight local quota snapshots |
+| Context health | Follows the currently interacted-with task about every two seconds and retains window occupancy and compaction data for the 20 most recent measurable tasks | Local task metadata and structured session events |
 
-Quota indicators are yellow below 20% remaining and red below 10%. Reset times are displayed as relative countdowns. The Today Conversations dialog groups turns by context window, shows each group's time range and token total, and lets you expand a group to see individual turns. It uses the Codex task name when the local App Server can match one; otherwise it falls back to the first local prompt.
+Quota indicators are yellow below 20% remaining and red below 10%. Reset times are displayed as relative countdowns. The Today Conversations dialog groups turns by Codex task ID, merging context windows from before and after compaction, and falls back to context-window grouping only for legacy payloads without a task ID. Each group shows its time range and token total and can be expanded to inspect individual turns. It uses the Codex task name when the local App Server can match one; otherwise it falls back to the first local prompt.
+
+Context health uses the current-window token count and context limit reported directly in Codex session events. The main panel shows context remaining as a dial beside the five-hour allowance; the whole module opens details, and a neutral dial is shown until data is available. On macOS, Codex Meter follows the App Server's most recently interacted-with task and reads only the tail of that session file about every two seconds, so switching to or continuing a task updates the card automatically. Usage below 60% is Healthy, 60–79% is Attention, 80–89% is High, and 90% or above is Critical. After context compaction, health is recalculated from the new window. This metric describes context occupancy, not account quota.
 
 ## Reset credits
 
@@ -58,7 +66,9 @@ The theme control cycles through **Follow System**, **Light**, and **Dark**. The
 
 Codex Meter reads local session statistics first, so today's activity can appear while account limits are still syncing. Until the first successful account sync, the native host keeps retrying at short intervals. If a later account request fails, local token and conversation details remain available, the panel shows the sync error, and the native host retries after short delays. Regular one-minute refreshes continue afterward.
 
-Structured session files are scanned from `~/.codex/sessions`, or from `$CODEX_HOME/sessions` when `CODEX_HOME` is set. Unchanged files are cached between refreshes. Dates and “today” use the device's current local time zone.
+Structured session files are scanned from `~/.codex/sessions`, or from `$CODEX_HOME/sessions` when `CODEX_HOME` is set. Codex Meter analyzes up to 90 days and caches unchanged files between refreshes. Dates and “today” use the device's current local time zone. Project and task statistics are local-only and may be lower than account-wide daily totals.
+
+On macOS, up to 14 days of lightweight quota-percentage snapshots are stored in Application Support for trend forecasting. They contain no prompts, file contents, or credentials. Notifications remain off until the user opts in and grants system permission.
 
 ## Platform behavior
 
@@ -67,7 +77,7 @@ Structured session files are scanned from `~/.codex/sessions`, or from `$CODEX_H
 | Supported systems | macOS 13 or later, Apple Silicon or Intel | Windows 10 22H2 or Windows 11, x64 |
 | Window behavior | Floats above other windows and appears across Spaces and full-screen apps | Stays on top on the current virtual desktop |
 | Background access | Remains clickable when another app is active | Remains clickable when another app is active |
-| System integration | Standard app window and Dock presence | System tray menu with **Show Codex Meter** and **Exit**; double-clicking the tray icon shows the panel |
+| System integration | Dock presence plus an optional menu-bar percentage, local notifications, and report export | System tray menu with **Show Codex Meter** and **Exit**; double-clicking the tray icon shows the panel |
 | Multiple launches | macOS handles the running app normally | A single-instance guard prevents duplicates and asks the existing instance to show itself |
 | Web runtime | Uses the system WKWebView | Uses Microsoft Edge WebView2 and offers the official download page when the runtime is missing |
 
@@ -99,7 +109,7 @@ xcode-select --install
 
 Codex Meter starts the local Codex App Server and uses its account endpoints for rate limits, reset times, reset credits, and optional account-wide daily usage buckets. It also requests the recent thread list so local context windows can use their matching Codex task names.
 
-Local session statistics come from structured JSONL events in the Codex sessions directory. Codex Meter uses them to calculate daily token totals, count today's user turns, group turns into context windows, and display local prompt previews. Account history takes precedence for dates returned by the App Server; missing or delayed dates are filled from local history so today's value does not unnecessarily drop to zero.
+Local session statistics come from structured JSONL events in the Codex sessions directory. Codex Meter uses them to calculate daily token totals, count today's user turns, group turns into context windows, read current window occupancy and compaction events, and display local prompt previews. Account history takes precedence for dates returned by the App Server; missing or delayed dates are filled from local history so today's value does not unnecessarily drop to zero.
 
 The first Codex App Server launch may be slower. Codex Meter displays local statistics first and retries account requests automatically when needed.
 
@@ -170,9 +180,11 @@ window.recordCodexTurn({ inputTokens: 1200, outputTokens: 480 });
 
 Hosts can optionally include `today.tokenSource`, `today.conversations`, and `history.dailyTokens` in the usage payload to populate the detail dialogs. Conversation entries may include `contextWindowId` and `threadName`; the widget falls back to `threadId` and then `turnId` when grouping older payloads, and to the first prompt when a task name is unavailable. Older payloads remain supported and show an empty detail state when these fields are absent.
 
+Extended hosts can also provide `insights.projects`, `insights.tasks`, `contextHealth.sessions`, `forecast.primary`, `forecast.secondary`, and capability flags. Context rows include task/project identifiers, `usedTokens`, `maxTokens`, `usedPercent`, `remainingPercent`, `status`, `lastActive`, and `compactions`; the context dial appears beside the five-hour allowance only with `capabilities.contextHealth`. Project and task entries may use `projectKind` with `project` or `non_project`; on macOS, sessions without a resolvable Git root are grouped under “非项目中对话” (non-project conversations). A `partial` refresh payload is used as a cold-start placeholder and does not replace stable history, task, or context-health data after a complete snapshot has arrived. Without `capabilities.extendedInsights`, the shared widget retains its legacy seven-day chart so older Windows and embedded hosts do not expose unavailable controls.
+
 ## Privacy
 
-Codex Meter has no analytics or separate backend, does not store account credentials, and does not upload local session content. Prompt previews stay inside the local app and are never sent to Codex Meter infrastructure. See [PRIVACY.md](PRIVACY.md).
+Codex Meter has no analytics or separate backend, does not store account credentials, and does not upload local session content. Prompt previews, project statistics, quota snapshots, and exported reports stay on the device. See [PRIVACY.md](PRIVACY.md).
 
 ## Contributing
 

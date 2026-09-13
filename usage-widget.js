@@ -10,6 +10,7 @@ const ICONS = {
   reset: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>`,
   token: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 7.8 4.5v9L12 21l-7.8-4.5v-9L12 3Z"/><path d="m4.5 7.7 7.5 4.4 7.5-4.4M12 12.1V21"/></svg>`,
   message: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15a4 4 0 0 1-4 4H8l-5 3V8a4 4 0 0 1 4-4h9a4 4 0 0 1 4 4v7Z"/></svg>`,
+  pulse: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2.2-5.2L13 17l2.2-5H21"/><path d="M19.1 5.9A5 5 0 0 0 12 6a5 5 0 0 0-7.1-.1"/></svg>`,
 };
 
 const DEFAULT_DATA = {
@@ -21,6 +22,10 @@ const DEFAULT_DATA = {
   tokenSource: "local",
   conversations: [],
   history: { source: "local", dailyTokens: [] },
+  insights: { localOnly: true, projects: [], tasks: [] },
+  contextHealth: { source: "local", sessions: [] },
+  forecast: {},
+  capabilities: {},
   plan: "同步中",
   updatedAt: Date.now(),
   syncMessage: "正在连接 Codex",
@@ -75,6 +80,35 @@ const hostBridge = {
     window.codexMeterBridge.setLaunchAtLogin({ enabled });
     return true;
   },
+  getNotificationSettings() {
+    if (!window.codexMeterBridge?.getNotificationSettings) return false;
+    window.codexMeterBridge.getNotificationSettings();
+    return true;
+  },
+  setNotificationSettings(payload) {
+    if (!window.codexMeterBridge?.setNotificationSettings) return false;
+    window.codexMeterBridge.setNotificationSettings(payload);
+    return true;
+  },
+  requestNotificationAuthorization() {
+    if (!window.codexMeterBridge?.requestNotificationAuthorization) return false;
+    window.codexMeterBridge.requestNotificationAuthorization();
+    return true;
+  },
+  sendTestNotification() {
+    window.codexMeterBridge?.sendTestNotification?.();
+  },
+  dismissNotificationPrompt() {
+    window.codexMeterBridge?.dismissNotificationPrompt?.();
+  },
+  setMenuBarVisible(enabled) {
+    window.codexMeterBridge?.setMenuBarVisible?.({ enabled });
+  },
+  exportReport(format) {
+    if (!window.codexMeterBridge?.exportReport) return false;
+    window.codexMeterBridge.exportReport({ format });
+    return true;
+  },
 };
 
 class CodexUsageWidget extends HTMLElement {
@@ -87,6 +121,7 @@ class CodexUsageWidget extends HTMLElement {
     this.collapsed = this.autoHover ? !this.pinned : localStorage.getItem("codex-widget-collapsed") === "true";
     this.theme = localStorage.getItem("codex-widget-theme") || "auto";
     this.syncState = "loading";
+    this.hasCompleteUsageSnapshot = false;
     this.expandedHeight = 443;
     this.hoverCloseTimer = null;
     this.collapseResizeTimer = null;
@@ -101,6 +136,19 @@ class CodexUsageWidget extends HTMLElement {
     this.launchAtLoginLoading = false;
     this.launchAtLoginMessage = "";
     this.expandedConversationGroups = new Set();
+    this.expandedInsightProjects = new Set();
+    this.insightView = "trend";
+    this.insightRange = 7;
+    this.notificationSettings = {
+      supported: false,
+      enabled: false,
+      thresholds: true,
+      exhausted: true,
+      restored: true,
+      menuBarVisible: true,
+      authorization: "notDetermined",
+    };
+    this.exportMessage = "";
     this.pointerInside = false;
     this.resetting = false;
     this.hostActive = window.codexMeterHostActive !== false;
@@ -235,15 +283,48 @@ class CodexUsageWidget extends HTMLElement {
     }
   }
 
+  mergeContextHealth(next) {
+    if (!next) return this.data.contextHealth;
+    return {
+      ...this.data.contextHealth,
+      ...next,
+      sessions: Array.isArray(next.sessions) ? next.sessions : this.contextHealthSessions(),
+    };
+  }
+
+  updateCurrentContextHealth(payload) {
+    const next = payload?.contextHealth || payload;
+    if (!next || typeof next !== "object") return;
+    const current = this.mergeContextHealth(next);
+    const liveSession = next.session;
+    if (liveSession && typeof liveSession === "object") {
+      const liveID = String(liveSession.threadId || liveSession.taskId || "");
+      const sessions = [...this.contextHealthSessions()];
+      const index = sessions.findIndex((session) => String(session.threadId || session.taskId || "") === liveID);
+      if (index >= 0) sessions[index] = { ...sessions[index], ...liveSession };
+      else sessions.unshift(liveSession);
+      current.sessions = sessions.slice(0, 20);
+    }
+    delete current.session;
+    this.data.contextHealth = current;
+    this.renderContextHealthSummary();
+    if (this.activeDialog === "context-health") this.renderContextHealth();
+  }
+
   updateUsage(payload) {
     if (payload.partial) {
-      const localStats = payload.today || {};
       this.syncState = "loading";
-      this.data.todayTokens = localStats.tokens ?? this.data.todayTokens;
-      this.data.todayQuestions = localStats.questions ?? this.data.todayQuestions;
-      this.data.tokenSource = localStats.tokenSource || this.data.tokenSource;
-      if (Array.isArray(localStats.conversations)) this.data.conversations = localStats.conversations;
-      if (payload.history?.dailyTokens) this.data.history = payload.history;
+      if (!this.hasCompleteUsageSnapshot) {
+        const localStats = payload.today || {};
+        this.data.todayTokens = localStats.tokens ?? this.data.todayTokens;
+        this.data.todayQuestions = localStats.questions ?? this.data.todayQuestions;
+        this.data.tokenSource = localStats.tokenSource || this.data.tokenSource;
+        if (Array.isArray(localStats.conversations)) this.data.conversations = localStats.conversations;
+        if (payload.history?.dailyTokens) this.data.history = payload.history;
+        if (payload.insights) this.data.insights = payload.insights;
+        if (payload.contextHealth) this.data.contextHealth = this.mergeContextHealth(payload.contextHealth);
+      }
+      if (payload.capabilities) this.data.capabilities = payload.capabilities;
       this.data.syncMessage = payload.syncMessage || "正在同步额度";
       this.data.updatedAt = Date.now();
       this.renderValues();
@@ -252,12 +333,17 @@ class CodexUsageWidget extends HTMLElement {
 
     this.syncState = payload.error ? "error" : "success";
     if (payload.error) {
-      const localStats = payload.today || {};
-      this.data.todayTokens = localStats.tokens ?? this.data.todayTokens;
-      this.data.todayQuestions = localStats.questions ?? this.data.todayQuestions;
-      this.data.tokenSource = localStats.tokenSource || this.data.tokenSource;
-      if (Array.isArray(localStats.conversations)) this.data.conversations = localStats.conversations;
-      if (payload.history?.dailyTokens) this.data.history = payload.history;
+      if (!this.hasCompleteUsageSnapshot) {
+        const localStats = payload.today || {};
+        this.data.todayTokens = localStats.tokens ?? this.data.todayTokens;
+        this.data.todayQuestions = localStats.questions ?? this.data.todayQuestions;
+        this.data.tokenSource = localStats.tokenSource || this.data.tokenSource;
+        if (Array.isArray(localStats.conversations)) this.data.conversations = localStats.conversations;
+        if (payload.history?.dailyTokens) this.data.history = payload.history;
+        if (payload.insights) this.data.insights = payload.insights;
+        if (payload.contextHealth) this.data.contextHealth = this.mergeContextHealth(payload.contextHealth);
+      }
+      if (payload.capabilities) this.data.capabilities = payload.capabilities;
       if (this.data.primary.remainingPercent == null) this.data.plan = "重试中";
       this.data.syncMessage = payload.error;
       this.data.updatedAt = Date.now();
@@ -268,6 +354,7 @@ class CodexUsageWidget extends HTMLElement {
     const primary = limits.primary || payload.primary;
     const secondary = limits.secondary || payload.secondary;
     const localStats = payload.today || this.readTodayStats();
+    this.hasCompleteUsageSnapshot = true;
 
     const remaining = (bucket) => {
       if (!bucket) return null;
@@ -293,11 +380,16 @@ class CodexUsageWidget extends HTMLElement {
       tokenSource: localStats.tokenSource || payload.history?.source || "local",
       conversations: Array.isArray(localStats.conversations) ? localStats.conversations : this.data.conversations,
       history: payload.history?.dailyTokens ? payload.history : this.data.history,
+      insights: payload.insights || this.data.insights,
+      contextHealth: payload.contextHealth ? this.mergeContextHealth(payload.contextHealth) : this.data.contextHealth,
+      forecast: payload.forecast || this.data.forecast,
+      capabilities: payload.capabilities || this.data.capabilities,
       plan: (limits.planType || payload.plan || "已连接").replace(/^./, (char) => char.toUpperCase()),
       updatedAt: Date.now(),
       syncMessage: payload.error || "实时数据",
     };
     this.renderValues();
+    if (this.data.capabilities?.notificationPromptNeeded) this.renderNotificationPrompt();
   }
 
   recordTurn({ inputTokens = 0, outputTokens = 0 } = {}) {
@@ -332,6 +424,11 @@ class CodexUsageWidget extends HTMLElement {
   formatNumber(value) {
     if (value == null) return "—";
     return new Intl.NumberFormat("zh-CN", { notation: value >= 10000 ? "compact" : "standard", maximumFractionDigits: 1 }).format(value);
+  }
+
+  formatExactNumber(value) {
+    if (value == null) return "—";
+    return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 }).format(value);
   }
 
   localDateKey(date = new Date()) {
@@ -386,6 +483,7 @@ class CodexUsageWidget extends HTMLElement {
       if (action === "settings") {
         this.openDialog("settings");
         this.requestLaunchAtLoginState();
+        this.requestNotificationSettings();
       }
       if (action === "refresh") this.refresh();
       if (action === "pin") this.togglePinned();
@@ -393,10 +491,53 @@ class CodexUsageWidget extends HTMLElement {
       if (action === "reset-credit") this.openResetDialog();
       if (action === "tokens-detail") this.openDialog("tokens");
       if (action === "conversations-detail") this.openDialog("conversations");
+      if (action === "context-health-detail") this.openDialog("context-health");
       if (action === "toggle-conversation-group") {
         const groupKey = event.target.closest("[data-group-key]")?.dataset.groupKey;
         if (groupKey) this.toggleConversationGroup(groupKey);
       }
+      if (action === "insight-view") {
+        this.hideInsightTooltip();
+        this.insightView = event.target.closest("[data-view]")?.dataset.view || "trend";
+        this.renderInsights();
+      }
+      if (action === "insight-range") {
+        this.hideInsightTooltip();
+        this.insightRange = Number(event.target.closest("[data-range]")?.dataset.range) || 7;
+        this.renderInsights();
+      }
+      if (action === "toggle-insight-project") {
+        const key = event.target.closest("[data-project-key]")?.dataset.projectKey;
+        if (key) {
+          if (this.expandedInsightProjects.has(key)) this.expandedInsightProjects.delete(key);
+          else this.expandedInsightProjects.add(key);
+          this.renderInsights();
+        }
+      }
+      if (action === "export-report") {
+        const format = event.target.closest("[data-format]")?.dataset.format || "md";
+        this.exportMessage = "正在打开保存位置…";
+        this.renderInsights();
+        if (!hostBridge.exportReport(format)) this.handleExportResult({ error: "当前宿主不支持导出" });
+      }
+      if (action === "enable-notifications") hostBridge.requestNotificationAuthorization();
+      if (action === "dismiss-notification-prompt") {
+        hostBridge.dismissNotificationPrompt();
+        this.data.capabilities.notificationPromptNeeded = false;
+        this.renderNotificationPrompt();
+      }
+      if (action === "toggle-notifications") {
+        if (this.notificationSettings.authorization === "notDetermined" && !this.notificationSettings.enabled) {
+          hostBridge.requestNotificationAuthorization();
+        } else {
+          hostBridge.setNotificationSettings({ enabled: !this.notificationSettings.enabled });
+        }
+      }
+      if (action === "toggle-notify-thresholds") hostBridge.setNotificationSettings({ thresholds: !this.notificationSettings.thresholds });
+      if (action === "toggle-notify-exhausted") hostBridge.setNotificationSettings({ exhausted: !this.notificationSettings.exhausted });
+      if (action === "toggle-notify-restored") hostBridge.setNotificationSettings({ restored: !this.notificationSettings.restored });
+      if (action === "toggle-menubar") hostBridge.setMenuBarVisible(!this.notificationSettings.menuBarVisible);
+      if (action === "test-notification") hostBridge.sendTestNotification();
       if (action === "close-dialog" || action === "cancel-reset") this.closeDialog();
       if (action === "confirm-reset") this.confirmReset();
       if (action === "toggle-startup") this.setLaunchAtLogin(!this.launchAtLogin);
@@ -422,6 +563,29 @@ class CodexUsageWidget extends HTMLElement {
         this.closeDialog();
       }
     });
+    this.shadowRoot.addEventListener("pointerover", (event) => {
+      const target = this.insightTooltipTarget(event.target);
+      if (target) this.showInsightTooltip(target, event);
+    });
+    this.shadowRoot.addEventListener("pointermove", (event) => {
+      const target = this.insightTooltipTarget(event.target);
+      if (target) this.showInsightTooltip(target, event);
+    });
+    this.shadowRoot.addEventListener("pointerout", (event) => {
+      const target = this.insightTooltipTarget(event.target);
+      if (!target || target === this.insightTooltipTarget(event.relatedTarget)) return;
+      this.hideInsightTooltip();
+    });
+    this.shadowRoot.addEventListener("focusin", (event) => {
+      const target = this.insightTooltipTarget(event.target);
+      if (target) this.showInsightTooltip(target);
+    });
+    this.shadowRoot.addEventListener("focusout", (event) => {
+      const target = this.insightTooltipTarget(event.target);
+      if (!target || target === this.insightTooltipTarget(event.relatedTarget)) return;
+      this.hideInsightTooltip();
+    });
+    this.shadowRoot.querySelector(".insights-body")?.addEventListener("scroll", () => this.hideInsightTooltip(), { passive: true });
   }
 
   togglePinned() {
@@ -447,6 +611,21 @@ class CodexUsageWidget extends HTMLElement {
     clearTimeout(this.motionSettleTimer);
     if (!this.collapsed) return;
 
+    this.collapsed = false;
+    const widget = this.shadowRoot.querySelector(".widget");
+    widget?.classList.remove("collapsed", "collapsed-settled");
+    this.beginPanelTransition();
+    this.updateMotionState();
+    requestAnimationFrame(() => {
+      this.syncNativeSize(true);
+      this.animateQuotaFill();
+    });
+  }
+
+  expandFromHost() {
+    clearTimeout(this.hoverCloseTimer);
+    clearTimeout(this.collapseResizeTimer);
+    if (!this.collapsed) return;
     this.collapsed = false;
     const widget = this.shadowRoot.querySelector(".widget");
     widget?.classList.remove("collapsed", "collapsed-settled");
@@ -508,16 +687,70 @@ class CodexUsageWidget extends HTMLElement {
     }
   }
 
+  requestNotificationSettings() {
+    if (!hostBridge.getNotificationSettings()) {
+      this.notificationSettings.supported = false;
+      this.renderNotificationSettings();
+    }
+  }
+
+  handleNotificationSettings(payload = {}) {
+    this.notificationSettings = { ...this.notificationSettings, ...payload, error: payload.error || "" };
+    if (payload.enabled) this.data.capabilities.notificationPromptNeeded = false;
+    this.renderNotificationSettings();
+    this.renderNotificationPrompt();
+  }
+
+  renderNotificationSettings() {
+    const container = this.shadowRoot.querySelector(".notification-settings");
+    if (!container) return;
+    if (!this.notificationSettings.supported) {
+      container.innerHTML = '<div class="setting-note">当前宿主不支持系统通知与菜单栏设置</div>';
+      return;
+    }
+    const toggle = (action, label, checked, disabled = false) => `<button class="setting-switch compact-switch" data-action="${action}" type="button" role="switch" aria-label="${label}" aria-checked="${checked}" ${disabled ? "disabled" : ""}><span></span></button>`;
+    const denied = this.notificationSettings.authorization === "denied";
+    container.innerHTML = `
+      <div class="setting-row"><div class="setting-copy"><strong>额度通知</strong><span>${denied ? "系统已拒绝通知权限，请在系统设置中允许" : "低额度、耗尽和恢复时提醒"}</span></div>${toggle("toggle-notifications", "额度通知", this.notificationSettings.enabled, denied)}</div>
+      <div class="setting-subrows ${this.notificationSettings.enabled ? "" : "is-disabled"}">
+        <div><span>20% / 10% / 5% 阈值</span>${toggle("toggle-notify-thresholds", "额度阈值通知", this.notificationSettings.thresholds, !this.notificationSettings.enabled)}</div>
+        <div><span>额度耗尽</span>${toggle("toggle-notify-exhausted", "额度耗尽通知", this.notificationSettings.exhausted, !this.notificationSettings.enabled)}</div>
+        <div><span>额度恢复</span>${toggle("toggle-notify-restored", "额度恢复通知", this.notificationSettings.restored, !this.notificationSettings.enabled)}</div>
+      </div>
+      <div class="setting-row"><div class="setting-copy"><strong>菜单栏额度</strong><span>显示 5 小时剩余百分比</span></div>${toggle("toggle-menubar", "菜单栏额度", this.notificationSettings.menuBarVisible)}</div>
+      <button class="setting-test" data-action="test-notification" type="button" ${this.notificationSettings.enabled ? "" : "disabled"}>发送测试通知</button>
+      ${payloadError(this.notificationSettings.error)}
+    `;
+
+    function payloadError(error) {
+      return error ? `<span class="setting-status is-error">${String(error).replaceAll("&", "&amp;").replaceAll("<", "&lt;")}</span>` : "";
+    }
+  }
+
+  renderNotificationPrompt() {
+    const prompt = this.shadowRoot.querySelector(".notification-prompt");
+    if (!prompt) return;
+    const visible = Boolean(this.data.capabilities?.notifications && this.data.capabilities?.notificationPromptNeeded);
+    prompt.toggleAttribute("hidden", !visible);
+    if (visible) requestAnimationFrame(() => this.syncNativeSize(false));
+  }
+
+  handleExportResult(payload = {}) {
+    this.exportMessage = payload.cancelled ? "" : payload.error ? `导出失败：${payload.error}` : `已保存到 ${payload.path || "所选位置"}`;
+    if (this.activeDialog === "tokens") this.renderInsights();
+  }
+
   openDialog(kind, focusSelector = "[data-action='close-dialog']") {
     clearTimeout(this.hoverCloseTimer);
     clearTimeout(this.collapseResizeTimer);
     this.activeDialog = kind;
     this.shadowRoot.querySelectorAll(".app-dialog").forEach((dialog) => dialog.setAttribute("hidden", ""));
-    if (kind === "tokens") this.renderTokenHistory();
+    if (kind === "tokens") this.renderInsights();
     if (kind === "conversations") {
       this.expandedConversationGroups.clear();
       this.renderConversations();
     }
+    if (kind === "context-health") this.renderContextHealth();
     const dialog = this.shadowRoot.querySelector(`[data-dialog='${kind}']`);
     dialog?.removeAttribute("hidden");
     requestAnimationFrame(() => dialog?.querySelector(focusSelector)?.focus());
@@ -525,6 +758,7 @@ class CodexUsageWidget extends HTMLElement {
 
   closeDialog() {
     if (this.resetting && this.activeDialog === "reset") return;
+    this.hideInsightTooltip();
     if (this.activeDialog === "conversations") {
       this.expandedConversationGroups.clear();
     }
@@ -560,29 +794,283 @@ class CodexUsageWidget extends HTMLElement {
     if (this.autoHover && !this.pointerInside) this.scheduleHoverCollapse();
   }
 
-  renderTokenHistory() {
-    const chart = this.shadowRoot.querySelector(".token-chart");
-    if (!chart) return;
-    const days = Array.isArray(this.data.history?.dailyTokens) ? this.data.history.dailyTokens.slice(-7) : [];
-    if (!days.length) {
-      chart.innerHTML = '<div class="dialog-empty">暂无历史用量数据</div>';
+  renderInsights() {
+    const body = this.shadowRoot.querySelector(".insights-body");
+    if (!body) return;
+    this.hideInsightTooltip();
+    const extended = Boolean(this.data.capabilities?.extendedInsights);
+    const title = this.shadowRoot.querySelector("#token-dialog-title");
+    const subtitle = title?.parentElement?.querySelector(".dialog-subtitle");
+    const tabs = this.shadowRoot.querySelector(".insight-tabs");
+    const ranges = this.shadowRoot.querySelector(".insight-ranges");
+    body.classList.toggle("is-trend", extended && this.insightView === "trend");
+    if (!extended) {
+      if (title) title.textContent = "最近 7 天 Tokens";
+      if (subtitle) subtitle.textContent = "";
+      tabs?.setAttribute("hidden", "");
+      ranges?.setAttribute("hidden", "");
+      const days = this.insightDays(7);
+      body.innerHTML = days.length ? this.barChart(days) : '<div class="dialog-empty">暂无历史用量数据</div>';
       return;
     }
+    if (title) title.textContent = "用量洞察";
+    if (subtitle) subtitle.textContent = "趋势估算与本机项目统计";
+    tabs?.removeAttribute("hidden");
+    this.shadowRoot.querySelectorAll("[data-action='insight-view']").forEach((button) => button.classList.toggle("is-active", button.dataset.view === this.insightView));
+    this.shadowRoot.querySelectorAll("[data-action='insight-range']").forEach((button) => button.classList.toggle("is-active", Number(button.dataset.range) === this.insightRange));
+    if (ranges) ranges.toggleAttribute("hidden", this.insightView === "report");
+    if (this.insightView === "projects") this.renderProjectInsights(body);
+    else if (this.insightView === "report") this.renderReportInsights(body);
+    else this.renderTrendInsights(body);
+  }
+
+  insightTooltipTarget(target) {
+    return target?.closest?.("[data-insight-tooltip]") || null;
+  }
+
+  showInsightTooltip(target, event) {
+    const tooltip = this.shadowRoot.querySelector(".insight-tooltip");
+    const dialog = this.shadowRoot.querySelector(".token-dialog-card");
+    if (!tooltip || !dialog || !target?.dataset.insightTooltip) return;
+    tooltip.textContent = target.dataset.insightTooltip;
+    tooltip.removeAttribute("hidden");
+    const targetRect = target.getBoundingClientRect();
+    const dialogRect = dialog.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const anchorX = Number.isFinite(event?.clientX) ? event.clientX : targetRect.left + targetRect.width / 2;
+    const anchorY = Number.isFinite(event?.clientY) ? event.clientY : targetRect.top + targetRect.height / 2;
+    const minimumLeft = dialogRect.left + 6;
+    const maximumLeft = Math.max(minimumLeft, dialogRect.right - tooltipRect.width - 6);
+    let top = anchorY - tooltipRect.height - 10;
+    if (top < dialogRect.top + 6) top = anchorY + 12;
+    top = clamp(top, dialogRect.top + 6, Math.max(dialogRect.top + 6, dialogRect.bottom - tooltipRect.height - 6));
+    tooltip.style.left = `${clamp(anchorX + 10, minimumLeft, maximumLeft)}px`;
+    tooltip.style.top = `${top}px`;
+  }
+
+  hideInsightTooltip() {
+    const tooltip = this.shadowRoot.querySelector(".insight-tooltip");
+    if (!tooltip) return;
+    tooltip.setAttribute("hidden", "");
+  }
+
+  insightDays(range = this.insightRange) {
+    const days = Array.isArray(this.data.history?.dailyTokens) ? this.data.history.dailyTokens : [];
+    return days.slice(-range);
+  }
+
+  insightTaskRows(range = this.insightRange) {
+    const tasks = Array.isArray(this.data.insights?.tasks) ? this.data.insights.tasks : [];
+    const allowed = new Set(this.insightDays(range).map((day) => day.date));
+    return tasks.filter((task) => allowed.has(task.date));
+  }
+
+  renderTrendInsights(body) {
+    const days = this.insightDays();
+    if (!days.length) {
+      body.innerHTML = '<div class="dialog-empty">暂无历史用量数据</div>';
+      return;
+    }
+    const total = days.reduce((sum, day) => sum + Math.max(0, Number(day.tokens) || 0), 0);
+    const peak = days.reduce((best, day) => Number(day.tokens) > Number(best.tokens) ? day : best, days[0]);
+    const stats = `<div class="insight-summary"><span><small>总量</small><strong>${this.escapeHTML(this.formatNumber(total))}</strong></span><span><small>日均</small><strong>${this.escapeHTML(this.formatNumber(Math.round(total / days.length)))}</strong></span><span><small>峰值日</small><strong>${this.escapeHTML(this.shortDate(peak.date))}</strong></span></div>`;
+    const forecast = this.forecastCard();
+    body.innerHTML = forecast + stats + (this.insightRange === 7 ? this.barChart(days) : this.heatmap(days));
+  }
+
+  forecastCard() {
+    const describe = (value) => {
+      if (!value) return "暂无足够数据";
+      if (value.status === "will_deplete" && value.estimatedExhaustsAt) {
+        const date = new Date(Number(value.estimatedExhaustsAt) * 1000);
+        if (!Number.isNaN(date.getTime())) return `预计 ${this.shortDateTime(date.toISOString())} 耗尽`;
+      }
+      return value.message || "暂无足够数据";
+    };
+    return `<div class="forecast-card"><span><small>5 小时 · 趋势估算</small><strong>${this.escapeHTML(describe(this.data.forecast?.primary))}</strong></span><span><small>每周 · 趋势估算</small><strong>${this.escapeHTML(describe(this.data.forecast?.secondary))}</strong></span></div>`;
+  }
+
+  barChart(days) {
     const maximum = Math.max(1, ...days.map((day) => Math.max(0, Number(day.tokens) || 0)));
     const today = this.localDateKey();
-    chart.innerHTML = days.map((day) => {
+    return `<div class="token-chart">${days.map((day) => {
       const tokens = Math.max(0, Number(day.tokens) || 0);
       const height = tokens === 0 ? 0 : Math.max(5, Math.round(tokens / maximum * 100));
-      const date = new Date(`${day.date}T00:00:00`);
-      const label = Number.isNaN(date.getTime())
-        ? day.date
-        : new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
-      return `<div class="chart-column ${day.date === today ? "is-today" : ""}">
-        <span class="chart-value">${this.escapeHTML(this.formatNumber(tokens))}</span>
-        <span class="chart-track"><i style="height:${height}%"></i></span>
-        <span class="chart-label">${this.escapeHTML(label)}</span>
-      </div>`;
-    }).join("");
+      const detail = `${day.date} · ${this.formatExactNumber(tokens)} Tokens · ${this.sourceLabel(day.source)}`;
+      return `<div class="chart-column ${day.date === today ? "is-today" : ""}" data-insight-tooltip="${this.escapeHTML(detail)}" tabindex="0" role="img" aria-label="${this.escapeHTML(detail)}"><span class="chart-value">${this.escapeHTML(this.formatNumber(tokens))}</span><span class="chart-track"><i style="height:${height}%"></i></span><span class="chart-label">${this.escapeHTML(this.shortDate(day.date))}</span></div>`;
+    }).join("")}</div>`;
+  }
+
+  heatmap(days) {
+    const nonzero = days.map((day) => Math.max(0, Number(day.tokens) || 0)).filter(Boolean).sort((a, b) => a - b);
+    const high = nonzero[Math.max(0, Math.floor(nonzero.length * .9) - 1)] || 1;
+    const leading = new Date(`${days[0].date}T00:00:00`).getDay();
+    const cells = Array.from({ length: leading }, () => '<span class="heat-cell is-empty" aria-hidden="true"></span>');
+    for (const day of days) {
+      const tokens = Math.max(0, Number(day.tokens) || 0);
+      const level = tokens === 0 ? 0 : Math.min(4, Math.max(1, Math.ceil(tokens / high * 4)));
+      const detail = `${day.date} · ${this.formatExactNumber(tokens)} Tokens · ${this.sourceLabel(day.source)}`;
+      cells.push(`<span class="heat-cell level-${level}" data-insight-tooltip="${this.escapeHTML(detail)}" tabindex="0" role="img" aria-label="${this.escapeHTML(detail)}"></span>`);
+    }
+    return `<div class="heatmap-wrap"><div class="heat-grid"><div class="heat-weekdays"><span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span></div><div class="heatmap">${cells.join("")}</div></div><div class="heat-legend"><span>少</span><i class="level-0"></i><i class="level-1"></i><i class="level-2"></i><i class="level-3"></i><i class="level-4"></i><span>多</span></div></div>`;
+  }
+
+  renderProjectInsights(body) {
+    const rows = this.insightTaskRows();
+    if (!rows.length) {
+      body.innerHTML = '<div class="dialog-empty">所选范围内没有本机项目记录</div>';
+      return;
+    }
+    const projects = new Map();
+    for (const row of rows) {
+      const key = row.projectKey || "unknown";
+      const name = row.projectName || "未识别项目";
+      const kind = row.projectKind || (key === "__non_project__" || name === "非项目中对话" ? "non_project" : "project");
+      const project = projects.get(key) || { key, name, kind, tokens: 0, turns: 0, tasks: new Map(), lastActive: "" };
+      project.tokens += Math.max(0, Number(row.tokens) || 0);
+      project.turns += Math.max(0, Number(row.turns) || 0);
+      if (String(row.lastActive || "") > project.lastActive) project.lastActive = row.lastActive;
+      const taskKey = row.taskId || row.name;
+      const task = project.tasks.get(taskKey) || { name: row.name || "未命名任务", tokens: 0, turns: 0, lastActive: "" };
+      task.tokens += Math.max(0, Number(row.tokens) || 0);
+      task.turns += Math.max(0, Number(row.turns) || 0);
+      if (String(row.lastActive || "") > task.lastActive) task.lastActive = row.lastActive;
+      project.tasks.set(taskKey, task);
+      projects.set(key, project);
+    }
+    body.innerHTML = `<div class="local-only-note">项目统计仅来自本机；其他任务统一归入“非项目中对话”</div><div class="project-insights">${[...projects.values()].sort((a, b) => b.tokens - a.tokens).map((project) => {
+      const expanded = this.expandedInsightProjects.has(project.key);
+      const tasks = [...project.tasks.values()].sort((a, b) => b.tokens - a.tokens);
+      return `<section class="insight-project ${expanded ? "is-expanded" : ""}"><button data-action="toggle-insight-project" data-project-key="${this.escapeHTML(project.key)}" type="button"><span class="project-copy"><span class="project-title-row"><strong>${this.escapeHTML(project.name)}</strong><span class="project-token"><b>${this.escapeHTML(this.formatNumber(project.tokens))}</b> Tokens</span></span><small>${project.turns} 轮 · ${tasks.length} 个任务</small></span>${ICONS.chevron}</button><div class="insight-task-list" ${expanded ? "" : "hidden"}>${tasks.map((task) => `<div><span><strong>${this.escapeHTML(task.name)}</strong><small>${task.turns} 轮${task.lastActive ? ` · ${this.escapeHTML(this.shortDateTime(task.lastActive))}` : ""}</small></span><b>${this.escapeHTML(this.formatNumber(task.tokens))} Tokens</b></div>`).join("")}</div></section>`;
+    }).join("")}</div>`;
+  }
+
+  renderReportInsights(body) {
+    const days = this.insightDays(7);
+    const rows = this.insightTaskRows(7);
+    const total = days.reduce((sum, day) => sum + Math.max(0, Number(day.tokens) || 0), 0);
+    const turns = rows.reduce((sum, row) => sum + Math.max(0, Number(row.turns) || 0), 0);
+    const projects = new Set(rows.filter((row) => {
+      const name = row.projectName || "";
+      return (row.projectKind || (row.projectKey === "__non_project__" || name === "非项目中对话" ? "non_project" : "project")) !== "non_project";
+    }).map((row) => row.projectKey)).size;
+    const topTasks = [...rows].sort((a, b) => Number(b.tokens) - Number(a.tokens)).slice(0, 5);
+    body.innerHTML = `<div class="report-preview"><div class="insight-summary"><span><small>Tokens</small><strong>${this.escapeHTML(this.formatNumber(total))}</strong></span><span><small>轮次</small><strong>${turns}</strong></span><span><small>项目</small><strong>${projects}</strong></span></div><strong class="report-title">最近 7 天 Top 任务</strong>${topTasks.length ? topTasks.map((task) => `<div class="report-task"><span>${this.escapeHTML(task.name || "未命名任务")}</span><b>${this.escapeHTML(this.formatNumber(task.tokens))}</b></div>`).join("") : '<div class="dialog-empty compact-empty">暂无本机任务记录</div>'}<p>整体趋势优先采用账户数据；项目和任务仅来自本机。</p><div class="report-actions"><button data-action="export-report" data-format="md" type="button">导出 Markdown</button><button data-action="export-report" data-format="csv" type="button">导出 CSV</button></div><span class="export-message">${this.escapeHTML(this.exportMessage)}</span></div>`;
+  }
+
+  shortDate(value) {
+    const date = new Date(`${value}T00:00:00`);
+    return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
+  }
+
+  shortDateTime(value) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "" : new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
+  }
+
+  sourceLabel(source) {
+    return source === "account" ? "账户" : source === "empty" ? "无记录" : "本机";
+  }
+
+  contextHealthSessions() {
+    return Array.isArray(this.data.contextHealth?.sessions) ? this.data.contextHealth.sessions : [];
+  }
+
+  currentContextHealthSession() {
+    const currentTaskId = String(this.data.contextHealth?.currentTaskId || "");
+    if (!currentTaskId) return null;
+    return this.contextHealthSessions().find((session) => String(session.threadId || session.taskId || "") === currentTaskId) || null;
+  }
+
+  contextHealthStatus(session) {
+    const suppliedUsed = Number(session?.usedPercent);
+    const suppliedRemaining = Number(session?.remainingPercent);
+    const used = Number.isFinite(suppliedUsed)
+      ? clamp(suppliedUsed, 0, 100)
+      : Number.isFinite(suppliedRemaining)
+        ? 100 - clamp(suppliedRemaining, 0, 100)
+        : 0;
+    const status = session?.status || (used >= 90 ? "critical" : used >= 80 ? "high" : used >= 60 ? "attention" : "healthy");
+    const labels = { healthy: "健康", attention: "注意", high: "紧张", critical: "危险" };
+    const remaining = Number.isFinite(suppliedRemaining) ? clamp(suppliedRemaining, 0, 100) : clamp(100 - used, 0, 100);
+    return { status, label: labels[status] || "健康", used, remaining };
+  }
+
+  contextHealthSummaryState() {
+    const supported = Boolean(this.data.capabilities?.contextHealth);
+    const sessions = this.contextHealthSessions();
+    const currentTaskId = String(this.data.contextHealth?.currentTaskId || "");
+    const session = this.currentContextHealthSession()
+      || (!currentTaskId ? [...sessions].sort((left, right) => String(right.lastActive || "").localeCompare(String(left.lastActive || "")))[0] : null);
+    if (!session) {
+      return {
+        supported,
+        available: false,
+        status: "empty",
+        label: "暂无数据",
+        remaining: null,
+        detail: this.data.contextHealth?.currentTaskName || (currentTaskId ? "等待当前对话写入上下文用量" : "等待 Codex 写入上下文用量"),
+      };
+    }
+    const health = this.contextHealthStatus(session);
+    return {
+      supported,
+      available: true,
+      ...health,
+      detail: session.name || "未命名任务",
+    };
+  }
+
+  renderContextHealthSummary() {
+    const card = this.shadowRoot.querySelector(".context-health-summary");
+    if (!card) return;
+    const state = this.contextHealthSummaryState();
+    card.toggleAttribute("hidden", !state.supported);
+    if (!state.supported) return;
+    const ring = card.querySelector(".context-health-ring");
+    const percent = card.querySelector(".context-health-percent");
+    const value = card.querySelector(".context-health-value");
+    const detail = card.querySelector(".context-health-detail");
+    card.classList.remove("is-empty", "is-attention", "is-high", "is-critical");
+    card.classList.toggle("is-empty", !state.available);
+    card.classList.toggle("is-attention", state.status === "attention");
+    card.classList.toggle("is-high", state.status === "high");
+    card.classList.toggle("is-critical", state.status === "critical");
+    ring?.style.setProperty("--value", state.remaining ?? 0);
+    if (percent) percent.textContent = state.available ? `${Math.round(state.remaining)}%` : "—";
+    if (value) value.textContent = state.label;
+    if (detail) detail.textContent = state.detail;
+    card.setAttribute("aria-label", state.available
+      ? `查看上下文健康度，${state.label}，剩余 ${Math.round(state.remaining)}%`
+      : `查看上下文健康度，${state.label}`);
+  }
+
+  renderContextHealth() {
+    const list = this.shadowRoot.querySelector(".context-health-list");
+    const summary = this.shadowRoot.querySelector(".context-health-dialog-summary");
+    if (!list || !summary) return;
+    const currentTaskId = String(this.data.contextHealth?.currentTaskId || "");
+    const sessions = [...this.contextHealthSessions()].sort((left, right) => {
+      const leftCurrent = String(left.threadId || left.taskId || "") === currentTaskId;
+      const rightCurrent = String(right.threadId || right.taskId || "") === currentTaskId;
+      if (leftCurrent !== rightCurrent) return leftCurrent ? -1 : 1;
+      return String(right.lastActive || "").localeCompare(String(left.lastActive || ""));
+    });
+    const risky = sessions.filter((session) => this.contextHealthStatus(session).used >= 80).length;
+    summary.textContent = sessions.length ? `当前对话实时跟随 · ${risky} 个需留意` : "当前没有可测量的上下文";
+    if (!sessions.length) {
+      list.innerHTML = '<div class="dialog-empty">运行一次 Codex 任务后，这里会显示当前上下文窗口占用。</div>';
+      return;
+    }
+    list.innerHTML = `<div class="context-health-note">切换或继续 Codex 对话后约 2 秒同步；健康度按模型上报的当前窗口占用计算。</div>${sessions.map((session) => {
+      const health = this.contextHealthStatus(session);
+      const usedTokens = Math.max(0, Number(session.usedTokens) || 0);
+      const maxTokens = Math.max(0, Number(session.maxTokens) || 0);
+      const project = session.projectName || "非项目中对话";
+      const compactions = Math.max(0, Number(session.compactions) || 0);
+      const isCurrent = String(session.threadId || session.taskId || "") === currentTaskId;
+      return `<article class="context-health-item is-${this.escapeHTML(health.status)}${isCurrent ? " is-current" : ""}"><div class="context-health-heading"><span><strong>${this.escapeHTML(session.name || "未命名任务")}${isCurrent ? '<em>当前对话</em>' : ""}</strong><small>${this.escapeHTML(project)} · ${this.escapeHTML(this.shortDateTime(session.lastActive))}</small></span><b>${Math.round(health.remaining)}%</b></div><div class="context-health-track"><i style="width:${health.used}%"></i></div><div class="context-health-meta"><span>${this.escapeHTML(health.label)} · 已用 ${this.escapeHTML(this.formatExactNumber(usedTokens))} / ${this.escapeHTML(this.formatExactNumber(maxTokens))}</span><span>${compactions ? `已压缩 ${compactions} 次` : "尚未压缩"}</span></div></article>`;
+    }).join("")}`;
   }
 
   renderConversations() {
@@ -591,7 +1079,7 @@ class CodexUsageWidget extends HTMLElement {
     if (!list || !summary) return;
     const conversations = Array.isArray(this.data.conversations) ? this.data.conversations : [];
     const groups = this.groupConversations(conversations);
-    summary.textContent = `本机记录 · ${groups.length} 个上下文 · ${conversations.length} 轮`;
+    summary.textContent = `本机记录 · ${groups.length} 个对话 · ${conversations.length} 轮`;
     if (!conversations.length) {
       list.innerHTML = '<div class="dialog-empty">今天还没有可显示的对话</div>';
       return;
@@ -637,10 +1125,10 @@ class CodexUsageWidget extends HTMLElement {
       const contextWindowId = String(conversation.contextWindowId || "").trim();
       const threadId = String(conversation.threadId || "").trim();
       const turnId = String(conversation.turnId || "").trim();
-      const key = contextWindowId
-        ? `context:${contextWindowId}`
-        : threadId
-          ? `thread:${threadId}`
+      const key = threadId
+        ? `thread:${threadId}`
+        : contextWindowId
+          ? `context:${contextWindowId}`
           : `turn:${turnId || `${conversation.startedAt || "unknown"}:${index}`}`;
       if (!groupsByKey.has(key)) groupsByKey.set(key, { key, insertionIndex: index, turns: [] });
       groupsByKey.get(key).turns.push({ ...conversation, insertionIndex: index });
@@ -955,9 +1443,12 @@ class CodexUsageWidget extends HTMLElement {
     updated.textContent = `${this.data.syncMessage} · ${new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(this.data.updatedAt)}`;
     updated.title = this.data.syncMessage;
     this.renderResetState();
-    if (this.activeDialog === "tokens") this.renderTokenHistory();
+    this.renderContextHealthSummary();
+    if (this.activeDialog === "tokens") this.renderInsights();
     if (this.activeDialog === "conversations") this.renderConversations();
+    if (this.activeDialog === "context-health") this.renderContextHealth();
     this.applySyncState();
+    this.renderNotificationPrompt();
     requestAnimationFrame(() => this.syncNativeSize(false));
   }
 
@@ -988,15 +1479,26 @@ class CodexUsageWidget extends HTMLElement {
         </header>
 
         <div class="body">
-          <div class="quota-hero">
-            <div class="ring primary-ring" style="--value:${this.data.primary.remainingPercent ?? 0}">
-              <div class="ring-inner"><strong class="primary-value">${this.formatPercent(this.data.primary.remainingPercent)}</strong><span>剩余</span></div>
+          <div class="notification-prompt" hidden>
+            <div><strong>开启额度提醒</strong><span>额度偏低、耗尽或恢复时通知你</span></div>
+            <button data-action="enable-notifications" type="button">开启</button>
+            <button data-action="dismiss-notification-prompt" type="button" aria-label="稍后提醒">稍后</button>
+          </div>
+          <div class="quota-overview">
+            <div class="quota-hero">
+              <div class="ring primary-ring" style="--value:${this.data.primary.remainingPercent ?? 0}">
+                <div class="ring-inner"><strong class="primary-value">${this.formatPercent(this.data.primary.remainingPercent)}</strong><span>剩余</span></div>
+              </div>
+              <div class="hero-copy">
+                <span class="section-label">${this.data.primary.label}</span>
+                <strong class="health">正在同步</strong>
+                <span class="muted primary-reset">${this.formatReset(this.data.primary.resetsAt)}</span>
+              </div>
             </div>
-            <div class="hero-copy">
-              <span class="section-label">${this.data.primary.label}</span>
-              <strong class="health">正在同步</strong>
-              <span class="muted primary-reset">${this.formatReset(this.data.primary.resetsAt)}</span>
-            </div>
+            <button class="context-health-summary" data-action="context-health-detail" type="button" aria-haspopup="dialog" hidden>
+              <span class="ring context-health-ring" style="--value:0" aria-hidden="true"><span class="ring-inner"><strong class="context-health-percent">—</strong><span>剩余</span></span></span>
+              <span class="context-health-copy"><small>上下文健康度</small><strong class="context-health-value">暂无数据</strong><span class="context-health-detail">等待 Codex 写入上下文用量</span></span>
+            </button>
           </div>
 
           <div class="weekly">
@@ -1027,10 +1529,13 @@ class CodexUsageWidget extends HTMLElement {
         <div class="app-dialog" data-dialog="tokens" role="dialog" aria-modal="true" aria-labelledby="token-dialog-title" hidden>
           <div class="dialog-card token-dialog-card">
             <div class="dialog-heading">
-              <div><strong id="token-dialog-title">最近 7 天 Tokens</strong></div>
+              <div><strong id="token-dialog-title">用量洞察</strong><span class="dialog-subtitle">趋势估算与本机项目统计</span></div>
               <button class="dialog-dismiss" data-action="close-dialog" type="button" aria-label="关闭用量图表">${ICONS.close}</button>
             </div>
-            <div class="token-chart"></div>
+            <div class="insight-tabs"><button class="is-active" data-action="insight-view" data-view="trend" type="button">趋势</button><button data-action="insight-view" data-view="projects" type="button">项目</button><button data-action="insight-view" data-view="report" type="button">周报</button></div>
+            <div class="insight-ranges"><button class="is-active" data-action="insight-range" data-range="7" type="button">7 天</button><button data-action="insight-range" data-range="30" type="button">30 天</button><button data-action="insight-range" data-range="90" type="button">90 天</button></div>
+            <div class="insights-body"></div>
+            <div class="insight-tooltip" role="tooltip" hidden></div>
           </div>
         </div>
         <div class="app-dialog" data-dialog="settings" role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title" hidden>
@@ -1048,6 +1553,7 @@ class CodexUsageWidget extends HTMLElement {
                 </div>
                 <button class="setting-switch" data-action="toggle-startup" type="button" role="switch" aria-label="开机自启动" aria-checked="false"><span></span></button>
               </div>
+              <div class="notification-settings"></div>
             </div>
           </div>
         </div>
@@ -1058,6 +1564,15 @@ class CodexUsageWidget extends HTMLElement {
               <button class="dialog-dismiss" data-action="close-dialog" type="button" aria-label="关闭对话列表">${ICONS.close}</button>
             </div>
             <div class="conversation-list"></div>
+          </div>
+        </div>
+        <div class="app-dialog" data-dialog="context-health" role="dialog" aria-modal="true" aria-labelledby="context-health-dialog-title" hidden>
+          <div class="dialog-card context-health-dialog-card">
+            <div class="dialog-heading">
+              <div><strong id="context-health-dialog-title">上下文健康度</strong><span class="dialog-subtitle context-health-dialog-summary">当前窗口占用 · 仅本机</span></div>
+              <button class="dialog-dismiss" data-action="close-dialog" type="button" aria-label="关闭上下文健康度">${ICONS.close}</button>
+            </div>
+            <div class="context-health-list"></div>
           </div>
         </div>
       </section>
@@ -1140,16 +1655,24 @@ class CodexUsageWidget extends HTMLElement {
       :host([native]) [data-action="collapse"] { display:none; }
       .collapsed header { border-bottom-color:transparent; }
       .collapsed [data-action="collapse"] { transform:rotate(-90deg); }
-      .quota-hero { display:flex; align-items:center; gap:17px; padding:15px; border:1px solid var(--line); border-radius:18px; background:var(--panel); }
-      .ring { --value:45; width:88px; height:88px; flex:0 0 auto; display:grid; place-items:center; border-radius:50%; background:conic-gradient(var(--quota-start) calc(var(--value)*1%),rgba(120,126,147,.13) 0); position:relative; box-shadow:inset 0 0 0 1px rgba(255,255,255,.22),0 0 16px var(--quota-glow); transition:background .35s ease,box-shadow .35s ease; }
+      .quota-overview { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); align-items:stretch; gap:8px; }
+      .quota-hero { min-width:0; min-height:158px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:0; overflow:hidden; padding:12px 10px 11px; border:1px solid var(--line); border-radius:18px; background:var(--panel); text-align:center; }
+      .notification-prompt { display:grid; grid-template-columns:minmax(0,1fr) auto auto; align-items:center; gap:7px; margin-bottom:10px; padding:9px 10px; border:1px solid rgba(111,99,230,.18); border-radius:13px; background:rgba(111,99,230,.075); }
+      .notification-prompt[hidden] { display:none; }
+      .notification-prompt>div { min-width:0; display:flex; flex-direction:column; gap:2px; }
+      .notification-prompt strong { font-size:10px; }
+      .notification-prompt span { overflow:hidden; color:var(--muted); font-size:8px; text-overflow:ellipsis; white-space:nowrap; }
+      .notification-prompt button { width:auto; height:25px; padding:0 8px; border:1px solid var(--line); font-size:9px; font-weight:650; }
+      .notification-prompt [data-action="enable-notifications"] { color:white; border-color:transparent; background:#6f63e6; }
+      .ring { --value:45; width:82px; height:82px; flex:0 0 auto; display:grid; place-items:center; border-radius:50%; background:conic-gradient(var(--quota-start) calc(var(--value)*1%),rgba(120,126,147,.13) 0); position:relative; box-shadow:inset 0 0 0 1px rgba(255,255,255,.22),0 0 16px var(--quota-glow); transition:background .35s ease,box-shadow .35s ease; }
       .ring::before { content:""; position:absolute; inset:7px; border-radius:inherit; background:var(--bg); box-shadow:inset 0 0 0 1px var(--line); }
       .ring-inner { position:relative; z-index:1; display:flex; flex-direction:column; align-items:center; }
-      .ring-inner strong { font-size:22px; letter-spacing:-.055em; }
-      .ring-inner span { margin-top:1px; color:var(--muted); font-size:10px; }
-      .hero-copy { min-width:0; display:flex; flex-direction:column; }
-      .section-label { margin-bottom:5px; color:var(--muted); font-size:11px; font-weight:600; }
-      .hero-copy>strong { margin-bottom:7px; font-size:18px; letter-spacing:-.04em; }
-      .muted { color:var(--muted); font-size:10px; }
+      .ring-inner strong { font-size:20px; letter-spacing:-.055em; }
+      .ring-inner span { margin-top:1px; color:var(--muted); font-size:9px; }
+      .hero-copy { min-width:0; width:100%; display:flex; flex-direction:column; align-items:center; margin-top:8px; }
+      .section-label { margin-bottom:3px; color:var(--muted); font-size:9px; font-weight:650; }
+      .hero-copy>strong { max-width:100%; overflow:hidden; margin-bottom:3px; font-size:14px; letter-spacing:-.03em; text-overflow:ellipsis; white-space:nowrap; }
+      .muted { max-width:100%; overflow:hidden; color:var(--muted); font-size:8px; text-overflow:ellipsis; white-space:nowrap; }
       .weekly { margin:12px 0; padding:14px 15px; border:1px solid var(--line); border-radius:16px; background:var(--panel); }
       .row { display:flex; align-items:center; justify-content:space-between; margin-bottom:9px; font-size:11px; }
       .row span { color:var(--muted); font-weight:600; }
@@ -1171,6 +1694,20 @@ class CodexUsageWidget extends HTMLElement {
       .violet { color:#7469ea; background:rgba(116,105,234,.12); }.cyan { color:#159abc; background:rgba(21,154,188,.11); }.coral { color:#e76876; background:rgba(231,104,118,.11); }
       .stat-value { display:block; overflow:hidden; font-size:18px; font-weight:700; letter-spacing:-.04em; text-overflow:ellipsis; }
       .stat-label { display:block; margin-top:3px; color:var(--muted); font-size:9px; white-space:nowrap; }
+      .context-health-summary { --context-start:#26a875; --context-end:#4fc993; --context-glow:rgba(44,173,122,.24); width:100%; height:auto; min-width:0; min-height:158px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:0; overflow:hidden; padding:12px 10px 11px; border:1px solid var(--line); border-radius:18px; color:var(--text); background:var(--panel); text-align:center; }
+      .context-health-summary[hidden] { display:none; }
+      .context-health-summary:hover,.context-health-summary:focus-visible { border-color:rgba(44,173,122,.3); background:rgba(44,173,122,.075); }
+      .context-health-ring { --quota-start:var(--context-start); --quota-end:var(--context-end); --quota-glow:var(--context-glow); }
+      .context-health-summary.is-empty .context-health-ring { --quota-start:#a1a6b5; --quota-end:#b8bdc9; --quota-glow:rgba(120,126,147,.16); }
+      .context-health-summary.is-attention .context-health-ring { --quota-start:#d99016; --quota-end:#f0ba38; --quota-glow:rgba(224,157,28,.28); }
+      .context-health-summary.is-high .context-health-ring,.context-health-summary.is-critical .context-health-ring { --quota-start:#df4655; --quota-end:#f06b61; --quota-glow:rgba(229,72,82,.3); }
+      .context-health-copy { min-width:0; width:100%; display:flex; flex-direction:column; align-items:center; margin-top:8px; }
+      .context-health-copy small { margin-bottom:3px; color:var(--muted); font-size:9px; font-weight:650; }
+      .context-health-copy strong { max-width:100%; overflow:hidden; margin-bottom:3px; color:var(--context-start); font-size:14px; letter-spacing:-.03em; text-overflow:ellipsis; white-space:nowrap; }
+      .context-health-summary.is-empty .context-health-copy strong { color:var(--muted); }
+      .context-health-summary.is-attention .context-health-copy strong { color:#d99016; }
+      .context-health-summary.is-high .context-health-copy strong,.context-health-summary.is-critical .context-health-copy strong { color:#df4655; }
+      .context-health-detail { max-width:100%; overflow:hidden; color:var(--muted); font-size:8px; text-overflow:ellipsis; white-space:nowrap; }
       footer { display:flex; align-items:center; margin-top:14px; padding:0 3px; color:var(--muted); font-size:9px; }
       .updated { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       .status-dot { width:6px; height:6px; flex:0 0 auto; margin-right:6px; border-radius:50%; background:#45be83; box-shadow:0 0 0 3px rgba(69,190,131,.1); }
@@ -1196,7 +1733,7 @@ class CodexUsageWidget extends HTMLElement {
       .dialog-subtitle { margin-top:4px; color:var(--muted); font-size:10px; }
       .dialog-dismiss { flex:0 0 auto; margin:-5px -5px 0 0; }
       .settings-dialog-card { min-height:180px; }
-      .settings-list { margin-top:18px; }
+      .settings-list { min-height:0; overflow-y:auto; margin:18px -5px 0; padding:0 5px 5px; }
       .setting-row { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:14px; border:1px solid var(--line); border-radius:15px; background:var(--panel); }
       .setting-copy { min-width:0; display:flex; flex-direction:column; }
       .setting-copy strong { font-size:12px; letter-spacing:-.015em; }
@@ -1209,8 +1746,37 @@ class CodexUsageWidget extends HTMLElement {
       .setting-switch[aria-checked="true"] { background:linear-gradient(135deg,#6559df,#8278ef); }
       .setting-switch[aria-checked="true"] span { transform:translateX(16px); }
       .setting-switch:disabled { cursor:wait; opacity:.55; }
-      .token-chart { height:260px; min-height:0; display:flex; align-items:stretch; justify-content:space-between; gap:5px; margin-top:19px; padding-top:18px; }
+      .notification-settings { display:flex; flex-direction:column; gap:9px; margin-top:9px; }
+      .notification-settings .setting-row { padding:11px 12px; }
+      .setting-subrows { display:flex; flex-direction:column; padding:5px 11px; border:1px solid var(--line); border-radius:13px; background:rgba(120,126,147,.035); }
+      .setting-subrows>div { min-height:34px; display:flex; align-items:center; justify-content:space-between; gap:12px; border-bottom:1px solid var(--line); color:var(--muted); font-size:9px; }
+      .setting-subrows>div:last-child { border-bottom:0; }
+      .setting-subrows.is-disabled { opacity:.58; }
+      .compact-switch { transform:scale(.86); transform-origin:right center; }
+      .setting-test { width:100%; height:31px; border:1px solid var(--line); font-size:10px; font-weight:650; }
+      .setting-note { padding:12px; color:var(--muted); font-size:10px; text-align:center; }
+      .notification-settings>.setting-status { color:var(--muted); font-size:9px; }
+      .notification-settings>.setting-status.is-error { color:#e95564; }
+      .insight-tabs,.insight-ranges { display:grid; grid-template-columns:repeat(3,1fr); gap:5px; margin-top:13px; padding:3px; border-radius:11px; background:rgba(120,126,147,.08); }
+      .insight-ranges { margin-top:7px; }
+      .insight-ranges[hidden] { display:none; }
+      .insight-tabs button,.insight-ranges button { width:auto; height:27px; border-radius:8px; font-size:9px; font-weight:650; }
+      .insight-tabs button.is-active,.insight-ranges button.is-active { color:#675bdf; background:var(--bg); box-shadow:0 1px 5px rgba(25,30,48,.09); }
+      .token-dialog-card { position:relative; }
+      .insights-body { min-height:0; flex:1 1 auto; overflow-y:auto; margin:10px -5px 0; padding:0 5px 5px; overscroll-behavior:contain; }
+      .insights-body.is-trend { overflow-y:hidden; }
+      .forecast-card { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:6px; }
+      .forecast-card>span { min-width:0; display:flex; flex-direction:column; gap:2px; padding:6px 8px; border:1px solid rgba(111,99,230,.15); border-radius:10px; background:rgba(111,99,230,.06); }
+      .forecast-card small { color:var(--muted); font-size:7px; }
+      .forecast-card strong { overflow:hidden; font-size:8px; line-height:1.35; text-overflow:ellipsis; white-space:nowrap; }
+      .insight-summary { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin-bottom:6px; }
+      .insight-summary span { display:flex; flex-direction:column; gap:2px; padding:6px 8px; border:1px solid var(--line); border-radius:11px; background:var(--panel); }
+      .insight-summary small { color:var(--muted); font-size:8px; }
+      .insight-summary strong { overflow:hidden; font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
+      .token-chart { height:156px; min-height:0; display:flex; align-items:stretch; justify-content:space-between; gap:5px; margin-top:2px; padding-top:10px; }
       .chart-column { min-width:0; flex:1 1 0; display:grid; grid-template-rows:18px minmax(0,1fr) 18px; align-items:end; text-align:center; }
+      .chart-column:focus { outline:none; }
+      .chart-column:focus .chart-track { box-shadow:0 0 0 2px rgba(111,99,230,.3); }
       .chart-value { overflow:hidden; color:var(--muted); font-size:8px; font-weight:650; text-overflow:ellipsis; white-space:nowrap; }
       .chart-track { position:relative; height:100%; min-height:80px; display:flex; align-items:flex-end; justify-content:center; overflow:hidden; border-radius:7px 7px 4px 4px; background:rgba(120,126,147,.08); }
       .chart-track i { width:70%; min-height:0; display:block; border-radius:6px 6px 3px 3px; background:linear-gradient(180deg,#31b6d1,#159abc); box-shadow:0 4px 12px rgba(21,154,188,.2); transition:height .35s cubic-bezier(.2,.8,.2,1); }
@@ -1218,6 +1784,62 @@ class CodexUsageWidget extends HTMLElement {
       .chart-column.is-today .chart-track i { background:linear-gradient(180deg,#8a87f4,#6960e8); box-shadow:0 4px 12px rgba(105,96,232,.25); }
       .chart-label { align-self:end; overflow:hidden; color:var(--muted); font-size:8px; white-space:nowrap; }
       .chart-column.is-today .chart-label { color:#7469ea; font-weight:750; }
+      .heatmap-wrap { padding:8px; border:1px solid var(--line); border-radius:13px; background:var(--panel); }
+      .heat-grid { display:grid; grid-template-columns:12px auto; justify-content:start; gap:5px; }
+      .heat-weekdays { display:grid; grid-template-rows:repeat(7,16px); gap:3px; color:var(--muted); font-size:7px; text-align:center; }
+      .heat-weekdays span { display:grid; place-items:center; }
+      .heatmap { display:grid; grid-template-rows:repeat(7,16px); grid-auto-flow:column; grid-auto-columns:16px; gap:3px; }
+      .heat-cell { width:16px; height:16px; border-radius:3px; background:rgba(120,126,147,.1); }
+      .heat-cell:focus { outline:2px solid rgba(111,99,230,.5); outline-offset:1px; }
+      .heat-cell.is-empty { visibility:hidden; }.heat-cell.level-1,.heat-legend .level-1 { background:#c8e9ef; }.heat-cell.level-2,.heat-legend .level-2 { background:#7bd0df; }.heat-cell.level-3,.heat-legend .level-3 { background:#31b6d1; }.heat-cell.level-4,.heat-legend .level-4 { background:#178ca9; }
+      .heat-legend { display:flex; align-items:center; justify-content:flex-end; gap:3px; margin-top:8px; color:var(--muted); font-size:7px; }
+      .heat-legend i { width:8px; height:8px; border-radius:2px; background:rgba(120,126,147,.1); }
+      .insight-tooltip { position:fixed; z-index:40; max-width:300px; padding:6px 8px; border:1px solid var(--line); border-radius:8px; color:var(--text); background:var(--bg); box-shadow:0 8px 24px rgba(25,30,48,.2); font-size:9px; font-weight:650; line-height:1.25; white-space:nowrap; pointer-events:none; }
+      .insight-tooltip[hidden] { display:none; }
+      .local-only-note { margin-bottom:7px; color:var(--muted); font-size:8px; text-align:center; }
+      .project-insights { display:flex; flex-direction:column; gap:7px; }
+      .insight-project { overflow:hidden; border:1px solid var(--line); border-radius:12px; background:rgba(120,126,147,.035); }
+      .insight-project>button { width:100%; height:auto; min-height:48px; display:grid; grid-template-columns:minmax(0,1fr) 14px; align-items:center; justify-items:stretch; gap:8px; padding:8px 10px; border-radius:0; color:var(--text); text-align:left; }
+      .project-copy,.insight-task-list div>span { min-width:0; display:flex; flex-direction:column; gap:3px; }
+      .project-copy { width:100%; }
+      .project-title-row { min-width:0; display:flex; align-items:center; justify-content:space-between; gap:10px; }
+      .project-title-row>strong { min-width:0; flex:1 1 auto; }
+      .insight-project strong,.insight-task-list strong { overflow:hidden; font-size:9px; text-overflow:ellipsis; white-space:nowrap; }
+      .insight-project small,.insight-task-list small { color:var(--muted); font-size:7px; }
+      .project-token { flex:0 0 auto; color:var(--muted); font-size:7px; font-weight:500; white-space:nowrap; }
+      .project-token b,.insight-task-list b { color:#159abc; font-size:9px; white-space:nowrap; }
+      .insight-project>button>svg { width:12px; justify-self:center; }
+      .insight-project.is-expanded>button>svg { transform:rotate(180deg); }
+      .insight-task-list[hidden] { display:none; }
+      .insight-task-list { border-top:1px solid var(--line); }
+      .insight-task-list>div { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid var(--line); }
+      .insight-task-list>div:last-child { border-bottom:0; }
+      .report-preview { display:flex; flex-direction:column; gap:7px; }
+      .report-title { margin-top:2px; font-size:10px; }
+      .report-task { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; padding:7px 8px; border:1px solid var(--line); border-radius:9px; font-size:8px; }
+      .report-task span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.report-task b { color:#159abc; }
+      .report-preview p { margin:2px 0; color:var(--muted); font-size:8px; line-height:1.45; }
+      .report-actions { display:grid; grid-template-columns:1fr 1fr; gap:7px; }
+      .report-actions button { width:auto; height:31px; border:1px solid var(--line); color:#675bdf; font-size:9px; font-weight:650; }
+      .export-message { min-height:12px; overflow-wrap:anywhere; color:var(--muted); font-size:8px; }
+      .compact-empty { min-height:50px; }
+      .context-health-dialog-card { padding-bottom:12px; }
+      .context-health-list { min-height:0; display:flex; flex-direction:column; gap:8px; overflow-y:auto; margin:12px -5px 0; padding:0 5px 6px; overscroll-behavior:contain; }
+      .context-health-note { padding:9px 10px; border-radius:10px; color:var(--muted); background:rgba(120,126,147,.07); font-size:8px; line-height:1.45; }
+      .context-health-item { --context-color:#2cad7a; flex:0 0 auto; padding:10px; border:1px solid var(--line); border-radius:12px; background:var(--panel); }
+      .context-health-item.is-current { border-color:color-mix(in srgb,var(--context-color) 38%,var(--line)); box-shadow:0 0 0 1px color-mix(in srgb,var(--context-color) 10%,transparent); }
+      .context-health-item.is-attention { --context-color:#d99016; }
+      .context-health-item.is-high,.context-health-item.is-critical { --context-color:#df4655; }
+      .context-health-heading { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:start; gap:9px; }
+      .context-health-heading>span { min-width:0; display:flex; flex-direction:column; gap:3px; }
+      .context-health-heading strong { overflow:hidden; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
+      .context-health-heading strong em { display:inline-block; margin-left:6px; padding:2px 5px; border-radius:6px; color:var(--context-color); background:color-mix(in srgb,var(--context-color) 11%,transparent); font-size:6px; font-style:normal; font-weight:700; vertical-align:1px; }
+      .context-health-heading small { overflow:hidden; color:var(--muted); font-size:7px; text-overflow:ellipsis; white-space:nowrap; }
+      .context-health-heading>b { color:var(--context-color); font-size:13px; }
+      .context-health-track { height:5px; overflow:hidden; margin:8px 0 6px; border-radius:6px; background:rgba(120,126,147,.12); }
+      .context-health-track i { display:block; height:100%; border-radius:inherit; background:var(--context-color); }
+      .context-health-meta { display:flex; justify-content:space-between; gap:8px; color:var(--muted); font-size:7px; }
+      .context-health-meta span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       .conversation-dialog-card { padding-bottom:12px; }
       .conversation-list { min-height:0; display:flex; flex-direction:column; gap:8px; overflow-x:hidden; overflow-y:auto; margin:14px -7px 0; padding:0 7px 6px; overscroll-behavior:contain; scrollbar-width:thin; }
       .conversation-group { flex:0 0 auto; overflow:hidden; border:1px solid var(--line); border-radius:13px; background:rgba(120,126,147,.035); }
@@ -1256,8 +1878,21 @@ customElements.define("codex-usage-widget", CodexUsageWidget);
 
 // Host integration helpers:
 window.updateCodexUsage = (payload) => document.querySelector("codex-usage-widget")?.updateUsage(payload);
+window.updateCodexContextHealth = (payload) => document.querySelector("codex-usage-widget")?.updateCurrentContextHealth(payload);
 window.codexResetResult = (payload) => document.querySelector("codex-usage-widget")?.handleResetResult(payload);
 window.codexLaunchAtLoginResult = (payload) => document.querySelector("codex-usage-widget")?.handleLaunchAtLoginResult(payload);
+window.codexNotificationSettingsResult = (payload) => document.querySelector("codex-usage-widget")?.handleNotificationSettings(payload);
+window.codexExportResult = (payload) => document.querySelector("codex-usage-widget")?.handleExportResult(payload);
 window.recordCodexTurn = (usage) => document.querySelector("codex-usage-widget")?.recordTurn(usage);
 window.codexUsageSetPanelAnchor = (payload) => document.querySelector("codex-usage-widget")?.setPanelAnchor(payload);
 window.codexUsageSetHostActive = (active) => document.querySelector("codex-usage-widget")?.setHostActive(active);
+window.codexUsageExpand = () => document.querySelector("codex-usage-widget")?.expandFromHost();
+window.codexUsageOpenDialog = (kind) => {
+  const widget = document.querySelector("codex-usage-widget");
+  widget?.expandFromHost();
+  widget?.openDialog(kind);
+  if (kind === "settings") {
+    widget?.requestLaunchAtLoginState();
+    widget?.requestNotificationSettings();
+  }
+};

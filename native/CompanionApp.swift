@@ -1,5 +1,7 @@
 import AppKit
 import ServiceManagement
+import UniformTypeIdentifiers
+import UserNotifications
 import WebKit
 
 final class FloatingPanel: NSPanel {
@@ -130,6 +132,13 @@ final class PanelBridge: NSObject, WKScriptMessageHandler {
     var onResetRequested: (() -> Void)?
     var onLaunchAtLoginStatusRequested: (() -> Void)?
     var onLaunchAtLoginChangeRequested: ((Bool) -> Void)?
+    var onNotificationSettingsRequested: (() -> Void)?
+    var onNotificationSettingsChangeRequested: (([String: Any]) -> Void)?
+    var onNotificationAuthorizationRequested: (() -> Void)?
+    var onNotificationTestRequested: (() -> Void)?
+    var onNotificationPromptDismissed: (() -> Void)?
+    var onMenuBarVisibilityChangeRequested: ((Bool) -> Void)?
+    var onExportRequested: ((String) -> Void)?
     private var compactFrame: NSRect?
 
     func prepareForDrag() {
@@ -183,6 +192,43 @@ final class PanelBridge: NSObject, WKScriptMessageHandler {
         if body["action"] as? String == "setLaunchAtLogin",
            let enabled = body["enabled"] as? Bool {
             onLaunchAtLoginChangeRequested?(enabled)
+            return
+        }
+
+        if body["action"] as? String == "getNotificationSettings" {
+            onNotificationSettingsRequested?()
+            return
+        }
+
+        if body["action"] as? String == "setNotificationSettings" {
+            onNotificationSettingsChangeRequested?(body)
+            return
+        }
+
+        if body["action"] as? String == "requestNotificationAuthorization" {
+            onNotificationAuthorizationRequested?()
+            return
+        }
+
+        if body["action"] as? String == "sendTestNotification" {
+            onNotificationTestRequested?()
+            return
+        }
+
+        if body["action"] as? String == "dismissNotificationPrompt" {
+            onNotificationPromptDismissed?()
+            return
+        }
+
+        if body["action"] as? String == "setMenuBarVisible",
+           let enabled = body["enabled"] as? Bool {
+            onMenuBarVisibilityChangeRequested?(enabled)
+            return
+        }
+
+        if body["action"] as? String == "exportReport",
+           let format = body["format"] as? String {
+            onExportRequested?(format)
             return
         }
 
@@ -259,7 +305,7 @@ final class PanelBridge: NSObject, WKScriptMessageHandler {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, UNUserNotificationCenterDelegate {
     private struct LifecycleObserver {
         let center: NotificationCenter
         let token: NSObjectProtocol
@@ -268,10 +314,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private var panel: NSPanel?
     private weak var webView: WKWebView?
     private let usageService = CodexUsageService()
+    private let quotaMonitor = CodexQuotaMonitor()
+    private let notificationCenter = UNUserNotificationCenter.current()
+    private let defaults = UserDefaults.standard
     private var isRefreshing = false
     private var isResetting = false
     private var refreshAfterReset = false
     private var refreshTimer: Timer?
+    private var contextHealthTimer: Timer?
+    private var isRefreshingContextHealth = false
     private var hasReceivedUsage = false
     private var retryAttempt = 0
     private var retryWorkItem: DispatchWorkItem?
@@ -281,6 +332,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private var screensActive = true
     private var powerActive = true
     private var appVisible = true
+    private var latestPayload: [String: Any] = [:]
+    private var latestQuotaReadings: [CodexQuotaReading] = []
+    private var latestQuotaForecast: [String: Any] = [:]
+    private var statusItem: NSStatusItem?
+    private let statusMenu = NSMenu()
+    private let primaryStatusMenuItem = NSMenuItem(title: "5 小时额度：—", action: nil, keyEquivalent: "")
+    private let secondaryStatusMenuItem = NSMenuItem(title: "每周额度：—", action: nil, keyEquivalent: "")
+    private let forecastStatusMenuItem = NSMenuItem(title: "趋势估算：暂无足够数据", action: nil, keyEquivalent: "")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -293,15 +352,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             NSApp.applicationIconImage = icon
         }
         createPanel()
+        notificationCenter.delegate = self
+        configureStatusMenu()
+        setMenuBarVisible(menuBarVisible)
         observeLifecycle()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         refreshTimer?.invalidate()
+        contextHealthTimer?.invalidate()
         retryWorkItem?.cancel()
         lifecycleObservers.forEach { $0.center.removeObserver($0.token) }
         lifecycleObservers.removeAll()
         usageService.shutdown()
+        if let statusItem { NSStatusBar.system.removeStatusItem(statusItem) }
     }
 
     private func createPanel() {
@@ -355,6 +419,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
           },
           setLaunchAtLogin(payload) {
             window.webkit.messageHandlers.panel.postMessage({ action: 'setLaunchAtLogin', enabled: payload?.enabled === true });
+          },
+          getNotificationSettings() {
+            window.webkit.messageHandlers.panel.postMessage({ action: 'getNotificationSettings' });
+          },
+          setNotificationSettings(payload) {
+            window.webkit.messageHandlers.panel.postMessage({ action: 'setNotificationSettings', ...payload });
+          },
+          requestNotificationAuthorization() {
+            window.webkit.messageHandlers.panel.postMessage({ action: 'requestNotificationAuthorization' });
+          },
+          sendTestNotification() {
+            window.webkit.messageHandlers.panel.postMessage({ action: 'sendTestNotification' });
+          },
+          dismissNotificationPrompt() {
+            window.webkit.messageHandlers.panel.postMessage({ action: 'dismissNotificationPrompt' });
+          },
+          setMenuBarVisible(payload) {
+            window.webkit.messageHandlers.panel.postMessage({ action: 'setMenuBarVisible', enabled: payload?.enabled !== false });
+          },
+          exportReport(payload) {
+            window.webkit.messageHandlers.panel.postMessage({ action: 'exportReport', format: payload?.format || 'md' });
           }
         };
         """
@@ -422,6 +507,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         bridge.onResetRequested = { [weak self] in self?.consumeResetCredit() }
         bridge.onLaunchAtLoginStatusRequested = { [weak self] in self?.deliverLaunchAtLoginResult() }
         bridge.onLaunchAtLoginChangeRequested = { [weak self] enabled in self?.setLaunchAtLogin(enabled) }
+        bridge.onNotificationSettingsRequested = { [weak self] in self?.deliverNotificationSettings() }
+        bridge.onNotificationSettingsChangeRequested = { [weak self] body in self?.setNotificationSettings(body) }
+        bridge.onNotificationAuthorizationRequested = { [weak self] in self?.requestNotificationAuthorization() }
+        bridge.onNotificationTestRequested = { [weak self] in self?.sendTestNotification() }
+        bridge.onNotificationPromptDismissed = { [weak self] in self?.dismissNotificationPrompt() }
+        bridge.onMenuBarVisibilityChangeRequested = { [weak self] enabled in self?.setMenuBarVisible(enabled) }
+        bridge.onExportRequested = { [weak self] format in self?.exportReport(format: format) }
         self.webView = webView
         panel.orderFrontRegardless()
         self.panel = panel
@@ -473,7 +565,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         isRefreshing = true
         usageService.fetch { [weak self] payload in
             guard let self else { return }
-            self.deliver(payload)
+            var enriched = payload
+            enriched["capabilities"] = self.capabilitiesPayload
+            if payload["partial"] as? Bool != true, payload["error"] == nil {
+                let result = self.quotaMonitor.process(payload)
+                enriched["forecast"] = result.forecast
+                self.latestQuotaReadings = result.readings
+                self.latestQuotaForecast = result.forecast
+                self.updateStatusItem(readings: result.readings, forecast: result.forecast)
+                self.deliverNotifications(result.events)
+            } else if payload["partial"] as? Bool != true {
+                self.updateStatusItem(readings: [], forecast: [:])
+            }
+            if payload["partial"] as? Bool != true || !self.hasReceivedUsage {
+                self.latestPayload = enriched
+            }
+            self.deliver(enriched)
 
             guard payload["partial"] as? Bool != true else { return }
             self.isRefreshing = false
@@ -493,6 +600,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
                 self.retryAttempt = 0
                 self.startRefreshTimerIfNeeded()
             }
+            self.startContextHealthTimerIfNeeded()
+            self.refreshCurrentContextHealth()
         }
     }
 
@@ -524,6 +633,260 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
               let data = try? JSONSerialization.data(withJSONObject: payload),
               let json = String(data: data, encoding: .utf8) else { return }
         webView?.evaluateJavaScript("window.codexResetResult?.(\(json));")
+    }
+
+    private var menuBarVisible: Bool {
+        defaults.object(forKey: "menuBarVisible") == nil ? true : defaults.bool(forKey: "menuBarVisible")
+    }
+
+    private var capabilitiesPayload: [String: Any] {
+        [
+            "extendedInsights": true,
+            "notifications": true,
+            "menuBar": true,
+            "reportExport": true,
+            "contextHealth": true,
+            "notificationPromptNeeded": !defaults.bool(forKey: "notificationPromptSeen")
+        ]
+    }
+
+    private func configureStatusMenu() {
+        primaryStatusMenuItem.isEnabled = false
+        secondaryStatusMenuItem.isEnabled = false
+        forecastStatusMenuItem.isEnabled = false
+        statusMenu.addItem(primaryStatusMenuItem)
+        statusMenu.addItem(secondaryStatusMenuItem)
+        statusMenu.addItem(forecastStatusMenuItem)
+        statusMenu.addItem(.separator())
+        statusMenu.addItem(NSMenuItem(title: "显示 Codex Meter", action: #selector(showPanelFromMenu), keyEquivalent: ""))
+        statusMenu.addItem(NSMenuItem(title: "立即刷新", action: #selector(refreshFromMenu), keyEquivalent: "r"))
+        statusMenu.addItem(NSMenuItem(title: "打开设置", action: #selector(openSettingsFromMenu), keyEquivalent: ","))
+        statusMenu.addItem(.separator())
+        statusMenu.addItem(NSMenuItem(title: "退出", action: #selector(quitFromMenu), keyEquivalent: "q"))
+        statusMenu.items.forEach { $0.target = self }
+    }
+
+    private func setMenuBarVisible(_ visible: Bool) {
+        defaults.set(visible, forKey: "menuBarVisible")
+        if visible, statusItem == nil {
+            let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+            if let button = item.button {
+                button.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: "Codex Meter")
+                button.imagePosition = .imageLeading
+                button.title = "—"
+                button.target = self
+                button.action = #selector(statusItemClicked)
+                button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+                button.toolTip = "左键显示 Codex Meter，右键打开菜单"
+            }
+            statusItem = item
+            if !latestQuotaReadings.isEmpty {
+                updateStatusItem(readings: latestQuotaReadings, forecast: latestQuotaForecast)
+            }
+        } else if !visible, let item = statusItem {
+            NSStatusBar.system.removeStatusItem(item)
+            statusItem = nil
+        }
+        deliverNotificationSettings()
+    }
+
+    @objc private func statusItemClicked() {
+        if NSApp.currentEvent?.type == .rightMouseUp, let button = statusItem?.button {
+            statusMenu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+        } else {
+            showPanel(expand: true)
+        }
+    }
+
+    @objc private func showPanelFromMenu() { showPanel(expand: true) }
+    @objc private func refreshFromMenu() { refreshUsage() }
+    @objc private func openSettingsFromMenu() {
+        showPanel(expand: true)
+        webView?.evaluateJavaScript("window.codexUsageOpenDialog?.('settings');")
+    }
+    @objc private func quitFromMenu() { NSApp.terminate(nil) }
+
+    private func showPanel(expand: Bool) {
+        panel?.orderFrontRegardless()
+        panel?.makeKey()
+        if expand { webView?.evaluateJavaScript("window.codexUsageExpand?.();") }
+    }
+
+    private func updateStatusItem(readings: [CodexQuotaReading], forecast: [String: Any]) {
+        let primary = readings.first { $0.key == "primary" }
+        let secondary = readings.first { $0.key == "secondary" }
+        statusItem?.button?.title = primary.map { "\(Int($0.remainingPercent.rounded()))%" } ?? "—"
+        primaryStatusMenuItem.title = "5 小时额度：\(primary.map { "\(Int($0.remainingPercent.rounded()))% · \(formatReset($0.resetsAt))" } ?? "—")"
+        secondaryStatusMenuItem.title = "每周额度：\(secondary.map { "\(Int($0.remainingPercent.rounded()))% · \(formatReset($0.resetsAt))" } ?? "—")"
+        let primaryForecast = forecast["primary"] as? [String: Any]
+        forecastStatusMenuItem.title = "趋势估算：\(forecastDescription(primaryForecast))"
+        statusItem?.button?.toolTip = "5 小时 \(primary.map { "\(Int($0.remainingPercent.rounded()))%" } ?? "—") · 每周 \(secondary.map { "\(Int($0.remainingPercent.rounded()))%" } ?? "—")"
+    }
+
+    private func forecastDescription(_ forecast: [String: Any]?) -> String {
+        guard let forecast else { return "暂无足够数据" }
+        if forecast["status"] as? String == "will_deplete",
+           let value = (forecast["estimatedExhaustsAt"] as? NSNumber)?.doubleValue {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "M月d日 HH:mm"
+            return "预计 \(formatter.string(from: Date(timeIntervalSince1970: value))) 耗尽"
+        }
+        return forecast["message"] as? String ?? "暂无足够数据"
+    }
+
+    private func formatReset(_ timestamp: TimeInterval?) -> String {
+        guard let timestamp else { return "等待同步" }
+        let seconds = max(0, timestamp - Date().timeIntervalSince1970)
+        if seconds >= 86_400 { return "\(Int(seconds / 86_400)) 天后重置" }
+        if seconds >= 3_600 { return "\(Int(seconds / 3_600)) 小时后重置" }
+        return "\(max(1, Int(seconds / 60))) 分钟后重置"
+    }
+
+    private func deliverNotifications(_ events: [CodexQuotaEvent]) {
+        guard defaults.bool(forKey: "notificationsEnabled") else { return }
+        for event in events {
+            let enabled: Bool
+            switch event.kind {
+            case .threshold: enabled = defaults.object(forKey: "notifyThresholds") == nil || defaults.bool(forKey: "notifyThresholds")
+            case .exhausted: enabled = defaults.object(forKey: "notifyExhausted") == nil || defaults.bool(forKey: "notifyExhausted")
+            case .restored: enabled = defaults.object(forKey: "notifyRestored") == nil || defaults.bool(forKey: "notifyRestored")
+            }
+            guard enabled else { continue }
+            let content = UNMutableNotificationContent()
+            content.sound = .default
+            switch event.kind {
+            case .threshold:
+                content.title = "\(event.reading.label)偏低"
+                content.body = "当前剩余 \(Int(event.reading.remainingPercent.rounded()))%，请留意本周期用量。"
+            case .exhausted:
+                content.title = "\(event.reading.label)已耗尽"
+                content.body = "额度将在\(formatReset(event.reading.resetsAt))。"
+            case .restored:
+                content.title = "\(event.reading.label)已恢复"
+                content.body = "当前剩余 \(Int(event.reading.remainingPercent.rounded()))%，可以继续使用。"
+            }
+            notificationCenter.add(UNNotificationRequest(
+                identifier: event.deduplicationKey,
+                content: content,
+                trigger: nil
+            ))
+        }
+    }
+
+    private func notificationSettingsDictionary(authorization: UNAuthorizationStatus) -> [String: Any] {
+        [
+            "supported": true,
+            "enabled": defaults.bool(forKey: "notificationsEnabled"),
+            "thresholds": defaults.object(forKey: "notifyThresholds") == nil ? true : defaults.bool(forKey: "notifyThresholds"),
+            "exhausted": defaults.object(forKey: "notifyExhausted") == nil ? true : defaults.bool(forKey: "notifyExhausted"),
+            "restored": defaults.object(forKey: "notifyRestored") == nil ? true : defaults.bool(forKey: "notifyRestored"),
+            "menuBarVisible": menuBarVisible,
+            "authorization": authorization == .authorized || authorization == .provisional ? "authorized" : (authorization == .denied ? "denied" : "notDetermined")
+        ]
+    }
+
+    private func deliverNotificationSettings(error: String? = nil) {
+        notificationCenter.getNotificationSettings { [weak self] settings in
+            guard let self else { return }
+            var payload = self.notificationSettingsDictionary(authorization: settings.authorizationStatus)
+            if let error { payload["error"] = error }
+            DispatchQueue.main.async { self.evaluateJavaScriptCallback("window.codexNotificationSettingsResult", payload: payload) }
+        }
+    }
+
+    private func setNotificationSettings(_ body: [String: Any]) {
+        if let value = body["enabled"] as? Bool { defaults.set(value, forKey: "notificationsEnabled") }
+        if let value = body["thresholds"] as? Bool { defaults.set(value, forKey: "notifyThresholds") }
+        if let value = body["exhausted"] as? Bool { defaults.set(value, forKey: "notifyExhausted") }
+        if let value = body["restored"] as? Bool { defaults.set(value, forKey: "notifyRestored") }
+        defaults.set(true, forKey: "notificationPromptSeen")
+        deliverNotificationSettings()
+    }
+
+    private func requestNotificationAuthorization() {
+        defaults.set(true, forKey: "notificationPromptSeen")
+        notificationCenter.requestAuthorization(options: [.alert, .sound]) { [weak self] granted, error in
+            guard let self else { return }
+            self.defaults.set(granted, forKey: "notificationsEnabled")
+            self.deliverNotificationSettings(error: error?.localizedDescription)
+        }
+    }
+
+    private func dismissNotificationPrompt() {
+        defaults.set(true, forKey: "notificationPromptSeen")
+        deliverNotificationSettings()
+    }
+
+    private func sendTestNotification() {
+        let content = UNMutableNotificationContent()
+        content.title = "Codex Meter 通知测试"
+        content.body = "通知已成功启用。"
+        content.sound = .default
+        notificationCenter.add(UNNotificationRequest(identifier: "codex-meter-test-\(UUID().uuidString)", content: content, trigger: nil)) { [weak self] error in
+            if let error { self?.deliverNotificationSettings(error: error.localizedDescription) }
+        }
+    }
+
+    private func exportReport(format: String) {
+        let normalized = format == "csv" ? "csv" : "md"
+        let data: Data
+        if normalized == "csv" {
+            data = CodexReportGenerator.csv(from: latestPayload)
+        } else {
+            data = Data(CodexReportGenerator.markdown(from: latestPayload).utf8)
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let savePanel = NSSavePanel()
+        savePanel.allowedContentTypes = [UTType(filenameExtension: normalized) ?? .data]
+        savePanel.nameFieldStringValue = "Codex-Meter-Report-\(formatter.string(from: Date())).\(normalized)"
+        savePanel.canCreateDirectories = true
+        let completion: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self else { return }
+            if response != .OK {
+                self.evaluateJavaScriptCallback("window.codexExportResult", payload: ["cancelled": true])
+                return
+            }
+            guard let url = savePanel.url else { return }
+            do {
+                try data.write(to: url, options: .atomic)
+                self.evaluateJavaScriptCallback("window.codexExportResult", payload: ["success": true, "path": url.path])
+            } catch {
+                self.evaluateJavaScriptCallback("window.codexExportResult", payload: ["error": error.localizedDescription])
+            }
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        if let panel {
+            panel.makeKeyAndOrderFront(nil)
+            savePanel.beginSheetModal(for: panel, completionHandler: completion)
+        } else {
+            savePanel.level = .floating
+            savePanel.begin(completionHandler: completion)
+        }
+    }
+
+    private func evaluateJavaScriptCallback(_ function: String, payload: [String: Any]) {
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView?.evaluateJavaScript("\(function)?.(\(json));")
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        showPanel(expand: true)
+        completionHandler()
     }
 
     private func setLaunchAtLogin(_ enabled: Bool) {
@@ -585,6 +948,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.refreshUsage()
         }
+    }
+
+    private func startContextHealthTimerIfNeeded() {
+        guard contextHealthTimer == nil else { return }
+        contextHealthTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            self?.refreshCurrentContextHealth()
+        }
+    }
+
+    private func refreshCurrentContextHealth() {
+        guard !isRefreshingContextHealth,
+              sessionActive,
+              screensActive,
+              powerActive,
+              appVisible else { return }
+        isRefreshingContextHealth = true
+        usageService.fetchCurrentContextHealth { [weak self] payload in
+            guard let self else { return }
+            self.isRefreshingContextHealth = false
+            guard let payload else { return }
+            self.deliverCurrentContextHealth(payload)
+        }
+    }
+
+    private func deliverCurrentContextHealth(_ payload: [String: Any]) {
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView?.evaluateJavaScript("window.updateCodexContextHealth?.(\(json));")
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

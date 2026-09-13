@@ -85,9 +85,12 @@ render_icon 1024 icon_512x512@2x.png
 "$swiftc_bin" \
   "$project_dir/native/CompanionApp.swift" \
   "$project_dir/native/CodexUsageService.swift" \
+  "$project_dir/native/CodexAnalytics.swift" \
   -o "$macos_dir/CodexUsageCompanion" \
   -framework AppKit \
   -framework ServiceManagement \
+  -framework UniformTypeIdentifiers \
+  -framework UserNotifications \
   -framework WebKit \
   -sdk "$sdk_path" \
   -target "$target" \

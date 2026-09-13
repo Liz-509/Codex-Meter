@@ -54,9 +54,13 @@ private final class JSONLineResponseCollector: @unchecked Sendable {
 }
 
 final class CodexUsageService {
+    private static let nonProjectKey = "__non_project__"
+    private static let nonProjectName = "非项目中对话"
+
     private struct DailyTokenStats {
         let date: String
         let tokens: Int
+        let source: String
     }
 
     private struct ConversationStats {
@@ -64,15 +68,35 @@ final class CodexUsageService {
         let threadId: String?
         let contextWindowId: String?
         let startedAt: Date
+        let date: String
+        let projectPath: String
         var preview: String
         var tokens: Int?
+    }
+
+    private struct ProjectDailyStats {
+        let date: String
+        let projectPath: String
+        let tokens: Int
+    }
+
+    private struct ContextHealthStats {
+        let threadId: String?
+        var contextWindowId: String?
+        var projectPath: String
+        var preview: String
+        var usedTokens: Int
+        var maxTokens: Int
+        var updatedAt: Date
+        var compactions: Int
     }
 
     private struct LocalStats {
         let dailyTokens: [DailyTokenStats]
         let conversations: [ConversationStats]
+        let projectDailyTokens: [ProjectDailyStats]
+        let contextHealth: [ContextHealthStats]
 
-        var questions: Int { conversations.count }
         var tokens: Int { dailyTokens.last?.tokens ?? 0 }
     }
 
@@ -84,6 +108,17 @@ final class CodexUsageService {
     private struct CachedSessionFile {
         let signature: SessionFileSignature
         let stats: LocalStats
+    }
+
+    private struct ContextMeasurement {
+        let usedTokens: Int
+        let maxTokens: Int
+        let updatedAt: Date
+    }
+
+    private struct CachedLiveContext {
+        let signature: SessionFileSignature
+        let measurement: ContextMeasurement?
     }
 
     private let workQueue = DispatchQueue(label: "com.local.codex-usage.service", qos: .userInitiated)
@@ -100,6 +135,8 @@ final class CodexUsageService {
     private var isShutdown = false
     private var sessionFiles: [String: CachedSessionFile] = [:]
     private var sessionWindowKey: String?
+    private var projectPathCache: [String: String] = [:]
+    private var liveContexts: [String: CachedLiveContext] = [:]
 
     private enum ServiceError: LocalizedError {
         case binaryMissing
@@ -154,7 +191,9 @@ final class CodexUsageService {
                     payload["history"] = [
                         "source": "account",
                         "localFallback": accountHistory.localFallback,
-                        "dailyTokens": accountHistory.days.map { ["date": $0.date, "tokens": $0.tokens] }
+                        "dailyTokens": accountHistory.days.map {
+                            ["date": $0.date, "tokens": $0.tokens, "source": $0.source]
+                        }
                     ]
                     var today = payload["today"] as? [String: Any] ?? [:]
                     today["tokens"] = accountHistory.days.last?.tokens ?? localStats.tokens
@@ -190,6 +229,42 @@ final class CodexUsageService {
                 payload = ["outcome": outcome]
             } catch {
                 payload = ["error": error.localizedDescription]
+            }
+
+            DispatchQueue.main.async {
+                completion(payload)
+            }
+        }
+    }
+
+    func fetchCurrentContextHealth(completion: @escaping ([String: Any]?) -> Void) {
+        workQueue.async {
+            let payload: [String: Any]?
+            do {
+                let responses = try self.performRequests([
+                    [
+                        "method": "thread/list",
+                        "id": 1,
+                        "params": [
+                            "limit": 8,
+                            "sortKey": "recency_at",
+                            "sortDirection": "desc",
+                            "useStateDbOnly": true
+                        ]
+                    ]
+                ], waitingFor: [1])
+                let result = try self.result(for: 1, method: "当前对话", in: responses)
+                let threads = result["data"] as? [[String: Any]] ?? []
+                if let thread = threads.first(where: {
+                    ($0["parentThreadId"] == nil || $0["parentThreadId"] is NSNull)
+                        && ($0["ephemeral"] as? Bool != true)
+                }) {
+                    payload = self.currentContextPayload(from: thread)
+                } else {
+                    payload = nil
+                }
+            } catch {
+                payload = nil
             }
 
             DispatchQueue.main.async {
@@ -455,12 +530,106 @@ final class CodexUsageService {
         from stats: LocalStats,
         threadNames: [String: String] = [:]
     ) -> [String: Any] {
-        [
+        let todayKey = stats.dailyTokens.last?.date ?? ""
+        let todayConversations = stats.conversations.filter { $0.date == todayKey }
+        let projectPaths = Set(stats.projectDailyTokens.map(\.projectPath) + stats.contextHealth.map(\.projectPath))
+        let projectNames = displayNames(for: projectPaths)
+        var taskRows: [String: [String: Any]] = [:]
+        for conversation in stats.conversations {
+            let taskID = conversation.threadId ?? conversation.contextWindowId ?? conversation.turnId
+            let key = "\(conversation.date)\u{0}\(conversation.projectPath)\u{0}\(taskID)"
+            var row = taskRows[key] ?? [
+                "date": conversation.date,
+                "projectKey": conversation.projectPath,
+                "projectName": projectNames[conversation.projectPath] ?? "未识别项目",
+                "projectKind": projectKind(for: conversation.projectPath),
+                "taskId": taskID,
+                "name": conversation.preview,
+                "turns": 0,
+                "tokens": 0,
+                "lastActive": ISO8601DateFormatter().string(from: conversation.startedAt),
+                "kind": "user"
+            ]
+            row["turns"] = ((row["turns"] as? NSNumber)?.intValue ?? 0) + 1
+            row["tokens"] = ((row["tokens"] as? NSNumber)?.intValue ?? 0) + (conversation.tokens ?? 0)
+            if let threadID = conversation.threadId,
+               let threadName = threadNames[threadID] {
+                row["name"] = threadName
+            }
+            if let lastValue = row["lastActive"] as? String,
+               ISO8601DateFormatter().string(from: conversation.startedAt) > lastValue {
+                row["lastActive"] = ISO8601DateFormatter().string(from: conversation.startedAt)
+            }
+            taskRows[key] = row
+        }
+
+        let projectDayTotals = Dictionary(uniqueKeysWithValues: stats.projectDailyTokens.map {
+            ("\($0.date)\u{0}\($0.projectPath)", $0.tokens)
+        })
+        var attributed: [String: Int] = [:]
+        for row in taskRows.values {
+            guard let date = row["date"] as? String,
+                  let project = row["projectKey"] as? String else { continue }
+            attributed["\(date)\u{0}\(project)", default: 0] += (row["tokens"] as? NSNumber)?.intValue ?? 0
+        }
+        for (key, total) in projectDayTotals {
+            let gap = max(0, total - (attributed[key] ?? 0))
+            guard gap > 0 else { continue }
+            let parts = key.split(separator: "\u{0}", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else { continue }
+            taskRows["\(key)\u{0}system"] = [
+                "date": parts[0],
+                "projectKey": parts[1],
+                "projectName": projectNames[parts[1]] ?? "未识别项目",
+                "projectKind": projectKind(for: parts[1]),
+                "taskId": "system",
+                "name": "系统/子代理活动",
+                "turns": 0,
+                "tokens": gap,
+                "lastActive": "",
+                "kind": "system"
+            ]
+        }
+
+        let projects: [[String: Any]] = projectNames.map { path, name in
+            var project: [String: Any] = [
+                "key": path,
+                "name": name,
+                "projectKind": projectKind(for: path)
+            ]
+            if path != Self.nonProjectKey { project["path"] = path }
+            return project
+        }.sorted { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
+        let contextRows: [[String: Any]] = stats.contextHealth
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .prefix(20)
+            .map { context in
+                let usedPercent = min(100, max(0, Double(context.usedTokens) / Double(context.maxTokens) * 100))
+                let taskID = context.threadId ?? context.contextWindowId ?? "context-\(Int(context.updatedAt.timeIntervalSince1970))"
+                var row: [String: Any] = [
+                    "taskId": taskID,
+                    "name": context.threadId.flatMap { threadNames[$0] } ?? context.preview,
+                    "projectKey": context.projectPath,
+                    "projectName": projectNames[context.projectPath] ?? "未识别项目",
+                    "projectKind": projectKind(for: context.projectPath),
+                    "usedTokens": context.usedTokens,
+                    "maxTokens": context.maxTokens,
+                    "usedPercent": usedPercent,
+                    "remainingPercent": max(0, 100 - usedPercent),
+                    "status": contextHealthStatus(usedPercent: usedPercent),
+                    "lastActive": ISO8601DateFormatter().string(from: context.updatedAt),
+                    "compactions": context.compactions
+                ]
+                if let threadID = context.threadId { row["threadId"] = threadID }
+                if let windowID = context.contextWindowId { row["contextWindowId"] = windowID }
+                return row
+            }
+        return [
             "today": [
-                "questions": stats.questions,
+                "questions": todayConversations.count,
                 "tokens": stats.tokens,
                 "tokenSource": "local",
-                "conversations": stats.conversations.map { conversation in
+                "conversations": todayConversations.map { conversation in
                     var item: [String: Any] = [
                         "turnId": conversation.turnId,
                         "startedAt": ISO8601DateFormatter().string(from: conversation.startedAt),
@@ -480,9 +649,55 @@ final class CodexUsageService {
             ],
             "history": [
                 "source": "local",
-                "dailyTokens": stats.dailyTokens.map { ["date": $0.date, "tokens": $0.tokens] }
+                "dailyTokens": stats.dailyTokens.map {
+                    ["date": $0.date, "tokens": $0.tokens, "source": $0.source]
+                }
+            ],
+            "insights": [
+                "localOnly": true,
+                "projects": projects,
+                "tasks": taskRows.values.sorted {
+                    let leftDate = $0["date"] as? String ?? ""
+                    let rightDate = $1["date"] as? String ?? ""
+                    if leftDate != rightDate { return leftDate > rightDate }
+                    return (($0["tokens"] as? NSNumber)?.intValue ?? 0) > (($1["tokens"] as? NSNumber)?.intValue ?? 0)
+                }
+            ],
+            "contextHealth": [
+                "source": "local",
+                "sessions": contextRows
             ]
         ]
+    }
+
+    private func contextHealthStatus(usedPercent: Double) -> String {
+        if usedPercent >= 90 { return "critical" }
+        if usedPercent >= 80 { return "high" }
+        if usedPercent >= 60 { return "attention" }
+        return "healthy"
+    }
+
+    private func displayNames(for paths: Set<String>) -> [String: String] {
+        let projectPaths = paths.filter { $0 != Self.nonProjectKey }
+        let basenames = Dictionary(grouping: projectPaths) {
+            URL(fileURLWithPath: $0).lastPathComponent.isEmpty ? "未识别项目" : URL(fileURLWithPath: $0).lastPathComponent
+        }
+        var result: [String: String] = [:]
+        if paths.contains(Self.nonProjectKey) {
+            result[Self.nonProjectKey] = Self.nonProjectName
+        }
+        for path in projectPaths {
+            let url = URL(fileURLWithPath: path)
+            let base = url.lastPathComponent.isEmpty ? "未识别项目" : url.lastPathComponent
+            result[path] = (basenames[base]?.count ?? 0) > 1
+                ? "\(base) — \(url.deletingLastPathComponent().lastPathComponent)"
+                : base
+        }
+        return result
+    }
+
+    private func projectKind(for projectPath: String) -> String {
+        projectPath == Self.nonProjectKey ? "non_project" : "project"
     }
 
     private func threadNames(from responses: [Int: [String: Any]]) -> [String: String] {
@@ -516,8 +731,8 @@ final class CodexUsageService {
         calendar.timeZone = .current
         let formatter = dateFormatter()
         let today = calendar.startOfDay(for: Date())
-        let dates = (0..<7).compactMap { offset in
-            calendar.date(byAdding: .day, value: offset - 6, to: today)
+        let dates = (0..<90).compactMap { offset in
+            calendar.date(byAdding: .day, value: offset - 89, to: today)
         }
         let keys = dates.map(formatter.string(from:))
         guard keys.contains(where: { values[$0] != nil }) else { return nil }
@@ -527,11 +742,11 @@ final class CodexUsageService {
         let days = dates.map { date in
             let key = formatter.string(from: date)
             if let tokens = values[key] {
-                return DailyTokenStats(date: key, tokens: tokens)
+                return DailyTokenStats(date: key, tokens: tokens, source: "account")
             }
             let tokens = localValues[key] ?? 0
             if tokens > 0 { localFallback = true }
-            return DailyTokenStats(date: key, tokens: tokens)
+            return DailyTokenStats(date: key, tokens: tokens, source: tokens > 0 ? "local" : "empty")
         }
         guard let todayKey = keys.last else { return nil }
         return (
@@ -541,13 +756,100 @@ final class CodexUsageService {
         )
     }
 
-    private func cachedLocalStats() -> LocalStats {
+    private func currentContextPayload(from thread: [String: Any]) -> [String: Any]? {
+        guard let threadID = thread["id"] as? String, !threadID.isEmpty else { return nil }
+        let suppliedName = (thread["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let preview = (thread["preview"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let taskName = [suppliedName, preview]
+            .compactMap { $0 }
+            .first(where: { !$0.isEmpty }) ?? "未命名任务"
+        var context: [String: Any] = [
+            "source": "local",
+            "trackingMode": "recent_conversation",
+            "currentTaskId": threadID,
+            "currentTaskName": taskName,
+            "pollIntervalSeconds": 2
+        ]
+
+        guard let path = thread["path"] as? String, !path.isEmpty,
+              let measurement = latestContextMeasurement(in: URL(fileURLWithPath: path)) else {
+            return ["contextHealth": context]
+        }
+        let cwd = thread["cwd"] as? String ?? ""
+        let projectPath = cwd.isEmpty ? Self.nonProjectKey : canonicalProjectPath(for: cwd)
+        let projectName = displayNames(for: [projectPath])[projectPath] ?? Self.nonProjectName
+        let usedPercent = min(100, max(0, Double(measurement.usedTokens) / Double(measurement.maxTokens) * 100))
+        context["session"] = [
+            "taskId": threadID,
+            "threadId": threadID,
+            "name": taskName,
+            "projectKey": projectPath,
+            "projectName": projectName,
+            "projectKind": projectKind(for: projectPath),
+            "usedTokens": measurement.usedTokens,
+            "maxTokens": measurement.maxTokens,
+            "usedPercent": usedPercent,
+            "remainingPercent": max(0, 100 - usedPercent),
+            "status": contextHealthStatus(usedPercent: usedPercent),
+            "lastActive": ISO8601DateFormatter().string(from: measurement.updatedAt)
+        ] as [String: Any]
+        return ["contextHealth": context]
+    }
+
+    private func latestContextMeasurement(in file: URL) -> ContextMeasurement? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: file.path),
+              let modifiedAt = attributes[.modificationDate] as? Date else { return liveContexts[file.path]?.measurement }
+        let size = (attributes[.size] as? NSNumber)?.intValue ?? 0
+        let signature = SessionFileSignature(size: size, modifiedAt: modifiedAt)
+        if let cached = liveContexts[file.path], cached.signature == signature {
+            return cached.measurement
+        }
+
+        let previous = liveContexts[file.path]?.measurement
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return previous }
+        defer { try? handle.close() }
+        let maximumTailBytes: UInt64 = 1_048_576
+        let end = (try? handle.seekToEnd()) ?? 0
+        let start = end > maximumTailBytes ? end - maximumTailBytes : 0
+        do {
+            try handle.seek(toOffset: start)
+        } catch {
+            return previous
+        }
+        let contents = String(decoding: handle.readDataToEndOfFile(), as: UTF8.self)
+        var measurement: ContextMeasurement?
+        for line in contents.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
+            guard line.contains("\"token_count\""),
+                  let data = String(line).data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  object["type"] as? String == "event_msg",
+                  let payload = object["payload"] as? [String: Any],
+                  payload["type"] as? String == "token_count",
+                  let info = payload["info"] as? [String: Any],
+                  let maximum = (info["model_context_window"] as? NSNumber)?.intValue,
+                  maximum > 0,
+                  let lastUsage = info["last_token_usage"] as? [String: Any],
+                  let used = (lastUsage["total_tokens"] as? NSNumber)?.intValue,
+                  let updatedAt = parseTimestamp(object["timestamp"] as? String) else { continue }
+            measurement = ContextMeasurement(
+                usedTokens: max(0, used),
+                maxTokens: maximum,
+                updatedAt: updatedAt
+            )
+            break
+        }
+        let resolved = measurement ?? previous
+        liveContexts[file.path] = CachedLiveContext(signature: signature, measurement: resolved)
+        return resolved
+    }
+
+    private func cachedLocalStats(now: Date = Date(), sessionsDirectory: URL? = nil) -> LocalStats {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
-        let today = calendar.startOfDay(for: Date())
-        let historyStart = calendar.date(byAdding: .day, value: -6, to: today) ?? today
+        let today = calendar.startOfDay(for: now)
+        let historyStart = calendar.date(byAdding: .day, value: -89, to: today) ?? today
         let formatter = dateFormatter()
-        let dayKeys = (0..<7).compactMap { offset -> String? in
+        let dayKeys = (0..<90).compactMap { offset -> String? in
             guard let date = calendar.date(byAdding: .day, value: offset, to: historyStart) else { return nil }
             return formatter.string(from: date)
         }
@@ -556,6 +858,7 @@ final class CodexUsageService {
         if sessionWindowKey != windowKey {
             sessionFiles.removeAll()
             sessionWindowKey = windowKey
+            projectPathCache.removeAll()
         }
 
         let environment = ProcessInfo.processInfo.environment
@@ -565,7 +868,7 @@ final class CodexUsageService {
         } else {
             codexHome = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
         }
-        let directory = codexHome.appendingPathComponent("sessions")
+        let directory = sessionsDirectory ?? codexHome.appendingPathComponent("sessions")
         guard let enumerator = FileManager.default.enumerator(
             at: directory,
             includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
@@ -573,13 +876,17 @@ final class CodexUsageService {
         ) else {
             sessionFiles.removeAll()
             return LocalStats(
-                dailyTokens: dayKeys.map { DailyTokenStats(date: $0, tokens: 0) },
-                conversations: []
+                dailyTokens: dayKeys.map { DailyTokenStats(date: $0, tokens: 0, source: "empty") },
+                conversations: [],
+                projectDailyTokens: [],
+                contextHealth: []
             )
         }
 
         var totals = Dictionary(uniqueKeysWithValues: dayKeys.map { ($0, 0) })
         var conversations: [String: ConversationStats] = [:]
+        var projectTotals: [String: Int] = [:]
+        var contextHealth: [String: ContextHealthStats] = [:]
         var seen = Set<String>()
         for case let file as URL in enumerator where file.pathExtension == "jsonl" {
             guard let values = try? file.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
@@ -606,6 +913,15 @@ final class CodexUsageService {
             for conversation in stats.conversations {
                 conversations[conversation.turnId] = conversation
             }
+            for projectDay in stats.projectDailyTokens {
+                projectTotals["\(projectDay.date)\u{0}\(projectDay.projectPath)", default: 0] += projectDay.tokens
+            }
+            for context in stats.contextHealth {
+                let key = context.threadId ?? context.contextWindowId ?? path
+                if context.updatedAt > (contextHealth[key]?.updatedAt ?? .distantPast) {
+                    contextHealth[key] = context
+                }
+            }
         }
         let stalePaths = sessionFiles.keys.filter { !seen.contains($0) }
         for path in stalePaths {
@@ -613,26 +929,54 @@ final class CodexUsageService {
         }
 
         return LocalStats(
-            dailyTokens: dayKeys.map { DailyTokenStats(date: $0, tokens: totals[$0] ?? 0) },
-            conversations: conversations.values.sorted { $0.startedAt > $1.startedAt }
+            dailyTokens: dayKeys.map {
+                let tokens = totals[$0] ?? 0
+                return DailyTokenStats(date: $0, tokens: tokens, source: tokens > 0 ? "local" : "empty")
+            },
+            conversations: conversations.values.sorted { $0.startedAt > $1.startedAt },
+            projectDailyTokens: projectTotals.compactMap { key, tokens in
+                let parts = key.split(separator: "\u{0}", maxSplits: 1).map(String.init)
+                guard parts.count == 2 else { return nil }
+                return ProjectDailyStats(date: parts[0], projectPath: parts[1], tokens: tokens)
+            },
+            contextHealth: contextHealth.values.sorted { $0.updatedAt > $1.updatedAt }
         )
     }
+
+#if CODEX_METER_TESTING
+    func localPayloadForTesting(sessionsDirectory: URL, now: Date) -> [String: Any] {
+        localPayload(from: cachedLocalStats(now: now, sessionsDirectory: sessionsDirectory))
+    }
+
+    func contextMeasurementForTesting(file: URL) -> [String: Any]? {
+        guard let measurement = latestContextMeasurement(in: file) else { return nil }
+        return [
+            "usedTokens": measurement.usedTokens,
+            "maxTokens": measurement.maxTokens,
+            "lastActive": ISO8601DateFormatter().string(from: measurement.updatedAt)
+        ]
+    }
+#endif
 
     private func parseSessionFile(
         _ file: URL,
         dayKeys: [String],
-        todayKey: String,
+        todayKey _: String,
         formatter: DateFormatter
     ) -> LocalStats? {
         var dailyTokens = Dictionary(uniqueKeysWithValues: dayKeys.map { ($0, 0) })
         var conversations: [String: ConversationStats] = [:]
+        var projectDailyTokens: [String: Int] = [:]
+        var contextHealth: ContextHealthStats?
         guard let contents = try? String(contentsOf: file, encoding: .utf8) else { return nil }
             var threadId: String?
             var contextWindowId: String?
             var currentTurnId: String?
+            var projectPath = Self.nonProjectKey
             var includeConversations = true
             var previousTotal = 0
             var usageRecordSinceTokenCount = false
+            var compactions = 0
 
             contents.enumerateLines { line, _ in
                 guard let data = line.data(using: .utf8),
@@ -643,6 +987,9 @@ final class CodexUsageService {
                 if rootType == "session_meta" {
                     threadId = payload["id"] as? String ?? threadId
                     includeConversations = self.isUserConversationSession(payload)
+                    if let cwd = payload["cwd"] as? String, !cwd.isEmpty {
+                        projectPath = self.canonicalProjectPath(for: cwd)
+                    }
                     if let contextWindow = payload["context_window"] as? [String: Any] {
                         contextWindowId = contextWindow["window_id"] as? String ?? contextWindowId
                     }
@@ -656,12 +1003,15 @@ final class CodexUsageService {
                         currentTurnId = turnId
                         guard let startedAt = self.parseTimestamp(object["timestamp"] as? String),
                               includeConversations,
-                              formatter.string(from: startedAt) == todayKey else { return }
+                              dailyTokens[formatter.string(from: startedAt)] != nil else { return }
+                        let date = formatter.string(from: startedAt)
                         conversations[turnId] = ConversationStats(
                             turnId: turnId,
                             threadId: threadId,
                             contextWindowId: contextWindowId,
                             startedAt: startedAt,
+                            date: date,
+                            projectPath: projectPath,
                             preview: "未命名对话",
                             tokens: nil
                         )
@@ -675,6 +1025,10 @@ final class CodexUsageService {
                        !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         conversation.preview = self.normalizePreview(message)
                         conversations[turnId] = conversation
+                        if var health = contextHealth, health.preview == "未命名任务" {
+                            health.preview = conversation.preview
+                            contextHealth = health
+                        }
                         return
                     }
 
@@ -683,6 +1037,23 @@ final class CodexUsageService {
                           let totalUsage = info["total_token_usage"] as? [String: Any],
                           let total = (totalUsage["total_tokens"] as? NSNumber)?.intValue else { return }
 
+                    if includeConversations,
+                       let maximum = (info["model_context_window"] as? NSNumber)?.intValue,
+                       maximum > 0,
+                       let lastUsage = info["last_token_usage"] as? [String: Any],
+                       let used = (lastUsage["total_tokens"] as? NSNumber)?.intValue,
+                       let updatedAt = self.parseTimestamp(object["timestamp"] as? String) {
+                        contextHealth = ContextHealthStats(
+                            threadId: threadId,
+                            contextWindowId: contextWindowId,
+                            projectPath: projectPath,
+                            preview: contextHealth?.preview ?? conversations[currentTurnId ?? ""]?.preview ?? "未命名任务",
+                            usedTokens: max(0, used),
+                            maxTokens: maximum,
+                            updatedAt: updatedAt,
+                            compactions: compactions
+                        )
+                    }
                     let delta = total >= previousTotal ? total - previousTotal : total
                     previousTotal = total
                     if usageRecordSinceTokenCount {
@@ -691,10 +1062,24 @@ final class CodexUsageService {
                     }
                     guard let timestamp = self.parseTimestamp(object["timestamp"] as? String) else { return }
                     let dateKey = formatter.string(from: timestamp)
-                    if dailyTokens[dateKey] != nil { dailyTokens[dateKey, default: 0] += max(0, delta) }
+                    if dailyTokens[dateKey] != nil {
+                        dailyTokens[dateKey, default: 0] += max(0, delta)
+                        projectDailyTokens["\(dateKey)\u{0}\(projectPath)", default: 0] += max(0, delta)
+                    }
                     if let turnId = currentTurnId, var conversation = conversations[turnId] {
                         conversation.tokens = (conversation.tokens ?? 0) + max(0, delta)
                         conversations[turnId] = conversation
+                    }
+                    return
+                }
+
+                if rootType == "compacted" {
+                    compactions += 1
+                    contextWindowId = payload["window_id"] as? String ?? contextWindowId
+                    if var health = contextHealth {
+                        health.contextWindowId = contextWindowId
+                        health.compactions = compactions
+                        contextHealth = health
                     }
                     return
                 }
@@ -708,6 +1093,7 @@ final class CodexUsageService {
                         let dateKey = formatter.string(from: timestamp)
                         if dailyTokens[dateKey] != nil {
                             dailyTokens[dateKey, default: 0] += max(0, responseTokens)
+                            projectDailyTokens["\(dateKey)\u{0}\(projectPath)", default: 0] += max(0, responseTokens)
                         }
                         countedUsageRecord = true
                     }
@@ -739,13 +1125,53 @@ final class CodexUsageService {
                 if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     conversation.preview = self.normalizePreview(text)
                     conversations[turnId] = conversation
+                    if var health = contextHealth, health.preview == "未命名任务" {
+                        health.preview = conversation.preview
+                        contextHealth = health
+                    }
                 }
             }
 
         return LocalStats(
-            dailyTokens: dayKeys.map { DailyTokenStats(date: $0, tokens: dailyTokens[$0] ?? 0) },
-            conversations: conversations.values.sorted { $0.startedAt > $1.startedAt }
+            dailyTokens: dayKeys.map {
+                let tokens = dailyTokens[$0] ?? 0
+                return DailyTokenStats(date: $0, tokens: tokens, source: tokens > 0 ? "local" : "empty")
+            },
+            conversations: conversations.values.sorted { $0.startedAt > $1.startedAt },
+            projectDailyTokens: projectDailyTokens.compactMap { key, tokens in
+                let parts = key.split(separator: "\u{0}", maxSplits: 1).map(String.init)
+                guard parts.count == 2 else { return nil }
+                return ProjectDailyStats(date: parts[0], projectPath: parts[1], tokens: tokens)
+            },
+            contextHealth: contextHealth.map { [$0] } ?? []
         )
+    }
+
+    private func canonicalProjectPath(for cwd: String) -> String {
+        if let cached = projectPathCache[cwd] { return cached }
+        let normalized = URL(fileURLWithPath: cwd).standardizedFileURL.path
+        var candidate = URL(fileURLWithPath: normalized, isDirectory: true)
+        while candidate.path != "/" {
+            let marker = candidate.appendingPathComponent(".git")
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: marker.path, isDirectory: &isDirectory) {
+                if isDirectory.boolValue {
+                    projectPathCache[cwd] = candidate.path
+                    return candidate.path
+                }
+                if let contents = try? String(contentsOf: marker, encoding: .utf8),
+                   let range = contents.range(of: "/.git/worktrees/") {
+                    let root = String(contents[..<range.lowerBound])
+                    projectPathCache[cwd] = root
+                    return root
+                }
+                projectPathCache[cwd] = candidate.path
+                return candidate.path
+            }
+            candidate.deleteLastPathComponent()
+        }
+        projectPathCache[cwd] = Self.nonProjectKey
+        return Self.nonProjectKey
     }
 
     private func parseTimestamp(_ value: String?) -> Date? {
