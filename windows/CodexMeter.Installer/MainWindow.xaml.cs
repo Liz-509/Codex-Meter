@@ -3,7 +3,8 @@ using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
-using Microsoft.Win32;
+using Forms = System.Windows.Forms;
+using Color = System.Windows.Media.Color;
 
 namespace CodexMeter.Installer;
 
@@ -139,24 +140,24 @@ public partial class MainWindow : Window
     {
         var currentParent = Directory.GetParent(_installDirectory)?.FullName
             ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        var dialog = new OpenFolderDialog
+        using var dialog = new Forms.FolderBrowserDialog
         {
-            Title = "选择 Codex Meter 的安装位置",
-            InitialDirectory = Directory.Exists(currentParent) ? currentParent : null,
-            Multiselect = false,
+            Description = "选择 Codex Meter 的安装位置",
+            SelectedPath = Directory.Exists(currentParent) ? currentParent : string.Empty,
+            ShowNewFolderButton = true,
         };
 
-        if (dialog.ShowDialog(this) != true)
+        if (dialog.ShowDialog() != Forms.DialogResult.OK)
         {
             return;
         }
 
         _installDirectory = string.Equals(
-            Path.GetFileName(dialog.FolderName.TrimEnd(Path.DirectorySeparatorChar)),
+            Path.GetFileName(dialog.SelectedPath.TrimEnd(Path.DirectorySeparatorChar)),
             "Codex Meter",
             StringComparison.OrdinalIgnoreCase)
-            ? Path.GetFullPath(dialog.FolderName)
-            : Path.Combine(Path.GetFullPath(dialog.FolderName), "Codex Meter");
+            ? Path.GetFullPath(dialog.SelectedPath)
+            : Path.Combine(Path.GetFullPath(dialog.SelectedPath), "Codex Meter");
         LocationText.Text = _installDirectory;
         LocationText.ToolTip = _installDirectory;
     }

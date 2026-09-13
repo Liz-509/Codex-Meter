@@ -32,8 +32,9 @@ New-Item $outputDirectory -ItemType Directory -Force | Out-Null
 dotnet publish $project `
     --configuration Release `
     --runtime win-x64 `
-    --self-contained true `
+    --self-contained false `
     --output $publishDirectory `
+    -p:WindowsAppSDKSelfContained=false `
     -p:Version=$Version `
     -p:AssemblyVersion="$Version.0" `
     -p:FileVersion="$Version.0"
@@ -64,8 +65,6 @@ $installerBuildArguments = @(
     "publish",
     $installerProject,
     "--configuration", "Release",
-    "--runtime", "win-x64",
-    "--self-contained", "true",
     "--output", $installerPublishDirectory,
     "-p:PayloadArchive=$payloadArchive",
     "-p:Version=$Version",
@@ -84,5 +83,10 @@ if (-not (Test-Path $builtInstaller)) {
 }
 
 Copy-Item $builtInstaller $installer
+
+$installerSize = (Get-Item $installer).Length
+if ($installerSize -gt 10MB) {
+    throw "Windows online installer exceeded the 10 MB size budget: $([math]::Round($installerSize / 1MB, 2)) MB"
+}
 
 Write-Output $installer

@@ -32,8 +32,8 @@ public sealed class UsagePayloadBuilderTests
         var history = payload["history"]!.AsObject();
         var days = history["dailyTokens"]!.AsArray();
         Assert.AreEqual("account", history["source"]!.GetValue<string>());
-        Assert.AreEqual(7, days.Count);
-        Assert.AreEqual("2026-09-05", days[0]!["date"]!.GetValue<string>());
+        Assert.AreEqual(90, days.Count);
+        Assert.AreEqual("2026-06-14", days[0]!["date"]!.GetValue<string>());
         Assert.AreEqual(0L, days[0]!["tokens"]!.GetValue<long>());
         Assert.AreEqual(1234L, days[^1]!["tokens"]!.GetValue<long>());
     }

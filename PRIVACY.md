@@ -9,8 +9,8 @@ Codex Meter runs locally on your device.
 - It scans local `~/.codex/sessions` event logs to calculate fallback daily token totals, project/task breakdowns, conversation turns, prompt previews, per-turn token counts, current context-window occupancy, and compaction counts.
 - Context health is calculated locally from the current-window token count and model context limit already present in session events. For live updates, only the current session log tail is re-read about every two seconds; these measurements are not uploaded or stored in a separate database.
 - Local prompt previews are rendered only inside Codex Meter's local WebView. They are not stored separately or sent to Codex Meter infrastructure.
-- On macOS, it stores up to 14 days of quota percentages and reset timestamps in the user's Application Support folder to calculate trend forecasts. These snapshots contain no prompts, source code, file contents, or credentials.
-- macOS notifications are disabled until the user explicitly enables them and grants system permission. Notification preferences and deduplication state are stored in local user defaults.
+- On macOS and Windows, it stores up to 14 days of quota percentages and reset timestamps in the platform's local application-data folder to calculate trend forecasts. These snapshots contain no prompts, source code, file contents, or credentials.
+- System notifications are disabled until the user explicitly enables them. Notification preferences and deduplication state are stored locally (`UserDefaults` on macOS and `%LOCALAPPDATA%\Codex Meter\settings.json` on Windows).
 - Markdown and CSV reports are generated locally and written only to a location chosen by the user in the system save dialog.
 - It does not upload session content, store account credentials, add analytics, or operate a separate server.
 - It does not modify the Codex or ChatGPT application.

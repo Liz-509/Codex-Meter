@@ -33,14 +33,25 @@ public partial class MainWindow : Window
     ];
 
     private readonly CodexUsageService _usageService = new();
+    private readonly LocalSettingsStore _settings;
+    private readonly QuotaMonitor _quotaMonitor;
+    private readonly WindowsNotificationService _notifications;
     private readonly LaunchAtLoginService _launchAtLoginService = new(
         Environment.ProcessPath ?? throw new InvalidOperationException("无法确定应用程序路径。"));
     private readonly DispatcherTimer _refreshTimer;
+    private readonly DispatcherTimer _contextHealthTimer;
     private readonly CancellationTokenSource _lifetime = new();
     private Forms.NotifyIcon? _trayIcon;
     private Drawing.Icon? _trayIconImage;
+    private Forms.ToolStripMenuItem? _primaryTrayItem;
+    private Forms.ToolStripMenuItem? _secondaryTrayItem;
+    private Forms.ToolStripMenuItem? _forecastTrayItem;
+    private JsonObject? _latestCompletePayload;
+    private IReadOnlyList<QuotaReading> _latestReadings = [];
+    private JsonObject _latestForecast = new();
     private bool _isRefreshing;
     private bool _isResetting;
+    private bool _isRefreshingContext;
     private bool _refreshAfterReset;
     private bool _isExiting;
     private bool _webReady;
@@ -58,6 +69,11 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
+        _settings = new LocalSettingsStore();
+        _quotaMonitor = new QuotaMonitor(_settings);
+        _notifications = new WindowsNotificationService(_settings);
+        _notifications.Invoked += () => Dispatcher.Invoke(ShowPanel);
+
         Browser.DefaultBackgroundColor = Drawing.Color.Transparent;
         Browser.MouseEnter += async (_, eventArgs) =>
             await NotifyHoverAsync(entered: true, eventArgs.GetPosition(Browser));
@@ -73,6 +89,8 @@ public partial class MainWindow : Window
 
         _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };
         _refreshTimer.Tick += async (_, _) => await RefreshUsageAsync();
+        _contextHealthTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+        _contextHealthTimer.Tick += async (_, _) => await RefreshCurrentContextHealthAsync();
     }
 
     public void ShowPanel()
@@ -87,6 +105,7 @@ public partial class MainWindow : Window
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         InitializeTrayIcon();
+        _notifications.InitializeIfEnabled();
         try
         {
             await InitializeWebViewAsync();
@@ -149,6 +168,30 @@ public partial class MainWindow : Window
               },
               setLaunchAtLogin(payload) {
                 window.chrome.webview.postMessage({ action: 'setLaunchAtLogin', enabled: payload?.enabled === true });
+              },
+              getNotificationSettings() {
+                window.chrome.webview.postMessage({ action: 'getNotificationSettings' });
+              },
+              setNotificationSettings(payload) {
+                window.chrome.webview.postMessage({ action: 'setNotificationSettings', ...payload });
+              },
+              requestNotificationAuthorization() {
+                window.chrome.webview.postMessage({ action: 'requestNotificationAuthorization' });
+              },
+              sendTestNotification() {
+                window.chrome.webview.postMessage({ action: 'sendTestNotification' });
+              },
+              dismissNotificationPrompt() {
+                window.chrome.webview.postMessage({ action: 'dismissNotificationPrompt' });
+              },
+              openNotificationSettings() {
+                window.chrome.webview.postMessage({ action: 'openNotificationSettings' });
+              },
+              setMenuBarVisible(payload) {
+                window.chrome.webview.postMessage({ action: 'setMenuBarVisible', enabled: payload?.enabled !== false });
+              },
+              exportReport(payload) {
+                window.chrome.webview.postMessage({ action: 'exportReport', format: payload?.format || 'md' });
               }
             };
             """);
@@ -206,6 +249,34 @@ public partial class MainWindow : Window
                         enabledValue.ValueKind is JsonValueKind.True;
                     await SetLaunchAtLoginAsync(enabled);
                     break;
+                case "getNotificationSettings":
+                    await DeliverNotificationSettingsAsync(_notifications.GetSettingsPayload());
+                    break;
+                case "setNotificationSettings":
+                    await DeliverNotificationSettingsAsync(_notifications.UpdateSettings(JsonNode.Parse(root.GetRawText())!.AsObject()));
+                    break;
+                case "requestNotificationAuthorization":
+                    await DeliverNotificationSettingsAsync(_notifications.RequestAuthorization());
+                    break;
+                case "sendTestNotification":
+                    await DeliverNotificationSettingsAsync(_notifications.SendTest());
+                    break;
+                case "dismissNotificationPrompt":
+                    _notifications.DismissPrompt();
+                    await DeliverNotificationSettingsAsync(_notifications.GetSettingsPayload());
+                    break;
+                case "openNotificationSettings":
+                    OpenNotificationSettings();
+                    break;
+                case "setMenuBarVisible":
+                    var trayPercentage = !root.TryGetProperty("enabled", out var trayValue) || trayValue.ValueKind is not JsonValueKind.False;
+                    _settings.Update(value => value.TrayPercentageVisible = trayPercentage);
+                    UpdateTrayIcon();
+                    await DeliverNotificationSettingsAsync(_notifications.GetSettingsPayload());
+                    break;
+                case "exportReport":
+                    await ExportReportAsync(root.TryGetProperty("format", out var format) ? format.GetString() : "md");
+                    break;
                 case "quit":
                     ExitApplication();
                     break;
@@ -225,11 +296,27 @@ public partial class MainWindow : Window
         try
         {
             var payload = await _usageService.FetchAsync(
-                DeliverOnDispatcherAsync,
+                async partial =>
+                {
+                    partial["capabilities"] = Capabilities(notificationPromptNeeded: false);
+                    await DeliverOnDispatcherAsync(partial);
+                },
                 _lifetime.Token);
+            var succeeded = payload["error"] is null;
+            if (succeeded)
+            {
+                var analytics = _quotaMonitor.Process(payload);
+                payload["forecast"] = analytics.Forecast;
+                _latestReadings = analytics.Readings;
+                _latestForecast = (JsonObject)analytics.Forecast.DeepClone();
+                _latestCompletePayload = (JsonObject)payload.DeepClone();
+                _notifications.Deliver(analytics.Events);
+                UpdateTrayStatus();
+            }
+            payload["capabilities"] = Capabilities(succeeded && !_settings.Read(value => value.NotificationPromptSeen));
             await DeliverAsync(payload);
 
-            if (payload["error"] is null)
+            if (succeeded)
             {
                 _hasReceivedUsage = true;
                 _retryAttempt = 0;
@@ -243,6 +330,8 @@ public partial class MainWindow : Window
             {
                 ScheduleRetry();
             }
+            if (!_contextHealthTimer.IsEnabled) _contextHealthTimer.Start();
+            await RefreshCurrentContextHealthAsync();
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
@@ -299,6 +388,82 @@ public partial class MainWindow : Window
         if (!_webReady || Browser.CoreWebView2 is null) return;
         var json = payload.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
         await Browser.CoreWebView2.ExecuteScriptAsync($"window.codexResetResult?.({json});");
+    }
+
+    private static JsonObject Capabilities(bool notificationPromptNeeded) => new()
+    {
+        ["extendedInsights"] = true,
+        ["contextHealth"] = true,
+        ["notifications"] = true,
+        ["menuBar"] = true,
+        ["reportExport"] = true,
+        ["notificationPromptNeeded"] = notificationPromptNeeded
+    };
+
+    private async Task RefreshCurrentContextHealthAsync()
+    {
+        if (_isRefreshingContext || !_webReady || !_sessionActive || !_powerActive || !_displayActive || !IsVisible) return;
+        _isRefreshingContext = true;
+        try
+        {
+            var payload = await _usageService.FetchCurrentContextHealthAsync(_lifetime.Token);
+            if (payload is null || Browser.CoreWebView2 is null) return;
+            var json = payload.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
+            await Browser.CoreWebView2.ExecuteScriptAsync($"window.updateCodexContextHealth?.({json});");
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        finally { _isRefreshingContext = false; }
+    }
+
+    private async Task DeliverNotificationSettingsAsync(JsonObject payload)
+    {
+        if (!_webReady || Browser.CoreWebView2 is null) return;
+        await Browser.CoreWebView2.ExecuteScriptAsync($"window.codexNotificationSettingsResult?.({payload.ToJsonString()});");
+    }
+
+    private async Task DeliverExportResultAsync(JsonObject payload)
+    {
+        if (!_webReady || Browser.CoreWebView2 is null) return;
+        await Browser.CoreWebView2.ExecuteScriptAsync($"window.codexExportResult?.({payload.ToJsonString()});");
+    }
+
+    private async Task ExportReportAsync(string? requestedFormat)
+    {
+        if (_latestCompletePayload is null)
+        {
+            await DeliverExportResultAsync(new JsonObject { ["error"] = "请等待首次完整同步后再导出。" });
+            return;
+        }
+        var format = string.Equals(requestedFormat, "csv", StringComparison.OrdinalIgnoreCase) ? "csv" : "md";
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            FileName = $"Codex-Meter-Report-{DateTime.Now:yyyy-MM-dd}.{format}",
+            DefaultExt = $".{format}",
+            Filter = format == "csv" ? "CSV 文件 (*.csv)|*.csv" : "Markdown 文件 (*.md)|*.md",
+            AddExtension = true,
+            OverwritePrompt = true
+        };
+        ShowPanel();
+        if (dialog.ShowDialog(this) != true)
+        {
+            await DeliverExportResultAsync(new JsonObject { ["cancelled"] = true });
+            return;
+        }
+        try
+        {
+            if (format == "csv") await File.WriteAllBytesAsync(dialog.FileName, ReportGenerator.Csv(_latestCompletePayload), _lifetime.Token);
+            else await File.WriteAllTextAsync(dialog.FileName, ReportGenerator.Markdown(_latestCompletePayload), new System.Text.UTF8Encoding(false), _lifetime.Token);
+            await DeliverExportResultAsync(new JsonObject { ["success"] = true, ["path"] = dialog.FileName });
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            await DeliverExportResultAsync(new JsonObject { ["error"] = error.Message });
+        }
+    }
+
+    private static void OpenNotificationSettings()
+    {
+        try { Process.Start(new ProcessStartInfo("ms-settings:notifications") { UseShellExecute = true }); } catch { }
     }
 
     private async Task DeliverLaunchAtLoginResultAsync(string? error = null)
@@ -605,7 +770,16 @@ public partial class MainWindow : Window
     private void InitializeTrayIcon()
     {
         var menu = new Forms.ContextMenuStrip();
+        _primaryTrayItem = new Forms.ToolStripMenuItem("5 小时额度：—") { Enabled = false };
+        _secondaryTrayItem = new Forms.ToolStripMenuItem("每周额度：—") { Enabled = false };
+        _forecastTrayItem = new Forms.ToolStripMenuItem("趋势估算：暂无足够数据") { Enabled = false };
+        menu.Items.Add(_primaryTrayItem);
+        menu.Items.Add(_secondaryTrayItem);
+        menu.Items.Add(_forecastTrayItem);
+        menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add("显示 Codex Meter", null, (_, _) => Dispatcher.Invoke(ShowPanel));
+        menu.Items.Add("立即刷新", null, async (_, _) => await Dispatcher.InvokeAsync(RefreshUsageAsync).Task.Unwrap());
+        menu.Items.Add("打开设置", null, (_, _) => Dispatcher.Invoke(OpenSettings));
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add("退出", null, (_, _) => Dispatcher.Invoke(ExitApplication));
 
@@ -618,7 +792,61 @@ public partial class MainWindow : Window
             Visible = true
         };
         _trayIcon.DoubleClick += (_, _) => Dispatcher.Invoke(ShowPanel);
+        UpdateTrayStatus();
     }
+
+    private void OpenSettings()
+    {
+        ShowPanel();
+        if (_webReady && Browser.CoreWebView2 is not null) _ = Browser.CoreWebView2.ExecuteScriptAsync("window.codexUsageOpenDialog?.('settings');");
+    }
+
+    private void UpdateTrayStatus()
+    {
+        if (_trayIcon is null) return;
+        var primary = _latestReadings.FirstOrDefault(item => item.Key == "primary");
+        var secondary = _latestReadings.FirstOrDefault(item => item.Key == "secondary");
+        _primaryTrayItem!.Text = $"5 小时额度：{FormatTrayReading(primary)}";
+        _secondaryTrayItem!.Text = $"每周额度：{FormatTrayReading(secondary)}";
+        var primaryForecast = _latestForecast["primary"] as JsonObject;
+        _forecastTrayItem!.Text = $"趋势估算：{ForecastDescription(primaryForecast)}";
+        _trayIcon.Text = TrimTrayText($"Codex Meter\n5 小时 {FormatTrayPercent(primary)} · 每周 {FormatTrayPercent(secondary)}\n{ForecastDescription(primaryForecast)}");
+        UpdateTrayIcon();
+    }
+
+    private void UpdateTrayIcon()
+    {
+        if (_trayIcon is null) return;
+        Drawing.Icon next;
+        var primary = _latestReadings.FirstOrDefault(item => item.Key == "primary");
+        if (_settings.Read(value => value.TrayPercentageVisible) && primary is not null) next = TrayIconRenderer.Render((int)Math.Round(primary.RemainingPercent));
+        else next = LoadApplicationIcon();
+        var previous = _trayIconImage;
+        _trayIconImage = next;
+        _trayIcon.Icon = next;
+        previous?.Dispose();
+    }
+
+    private static string FormatTrayReading(QuotaReading? reading) => reading is null ? "—" : $"{(int)Math.Round(reading.RemainingPercent)}% · {FormatTrayReset(reading.ResetsAt)}";
+    private static string FormatTrayPercent(QuotaReading? reading) => reading is null ? "—" : $"{(int)Math.Round(reading.RemainingPercent)}%";
+    private static string FormatTrayReset(double? timestamp)
+    {
+        if (!timestamp.HasValue) return "等待同步";
+        var seconds = Math.Max(0, timestamp.Value - DateTimeOffset.Now.ToUnixTimeSeconds());
+        if (seconds >= 86_400) return $"{(int)(seconds / 86_400)} 天后重置";
+        if (seconds >= 3_600) return $"{(int)(seconds / 3_600)} 小时后重置";
+        return $"{Math.Max(1, (int)(seconds / 60))} 分钟后重置";
+    }
+
+    private static string ForecastDescription(JsonObject? forecast)
+    {
+        if (forecast is null) return "暂无足够数据";
+        if (forecast["status"]?.GetValue<string>() == "will_deplete" && forecast["estimatedExhaustsAt"] is JsonValue value && value.TryGetValue<double>(out var timestamp))
+            return $"预计 {DateTimeOffset.FromUnixTimeSeconds((long)timestamp).ToLocalTime():M月d日 HH:mm} 耗尽";
+        return forecast["message"]?.GetValue<string>() ?? "暂无足够数据";
+    }
+
+    private static string TrimTrayText(string value) => value.Length <= 127 ? value : value[..127];
 
     private static Drawing.Icon LoadApplicationIcon()
     {
@@ -666,6 +894,7 @@ public partial class MainWindow : Window
     {
         _lifetime.Cancel();
         _refreshTimer.Stop();
+        _contextHealthTimer.Stop();
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         SystemEvents.SessionSwitch -= OnSessionSwitch;
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
@@ -683,6 +912,7 @@ public partial class MainWindow : Window
         }
         _trayIconImage?.Dispose();
         Browser.Dispose();
+        _notifications.Dispose();
         _usageService.Dispose();
         _lifetime.Dispose();
         if (!_isExiting) ExitApplication();

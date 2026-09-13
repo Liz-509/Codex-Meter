@@ -1,6 +1,7 @@
 using System.IO;
 using System.Threading;
 using System.Windows;
+using CodexMeter.Windows.Services;
 
 namespace CodexMeter.Windows;
 
@@ -20,6 +21,12 @@ public partial class App : System.Windows.Application
         if (e.Args.Contains("--self-test", StringComparer.OrdinalIgnoreCase))
         {
             Shutdown(RunSelfTest());
+            return;
+        }
+
+        if (e.Args.Contains("--notification-self-test", StringComparer.OrdinalIgnoreCase))
+        {
+            Shutdown(WindowsNotificationService.RunRegistrationSelfTest());
             return;
         }
 
@@ -89,7 +96,8 @@ public partial class App : System.Windows.Application
         var requiredFiles = new[]
         {
             Path.Combine(resourceDirectory, "companion.html"),
-            Path.Combine(resourceDirectory, "usage-widget.js")
+            Path.Combine(resourceDirectory, "usage-widget.js"),
+            Path.Combine(AppContext.BaseDirectory, "Microsoft.WindowsAppRuntime.Insights.Resource.dll")
         };
 
         return requiredFiles.All(File.Exists) ? 0 : 1;

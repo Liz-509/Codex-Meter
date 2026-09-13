@@ -101,6 +101,9 @@ const hostBridge = {
   dismissNotificationPrompt() {
     window.codexMeterBridge?.dismissNotificationPrompt?.();
   },
+  openNotificationSettings() {
+    window.codexMeterBridge?.openNotificationSettings?.();
+  },
   setMenuBarVisible(enabled) {
     window.codexMeterBridge?.setMenuBarVisible?.({ enabled });
   },
@@ -147,6 +150,8 @@ class CodexUsageWidget extends HTMLElement {
       restored: true,
       menuBarVisible: true,
       authorization: "notDetermined",
+      error: "",
+      notice: "",
     };
     this.exportMessage = "";
     this.pointerInside = false;
@@ -526,6 +531,7 @@ class CodexUsageWidget extends HTMLElement {
         this.data.capabilities.notificationPromptNeeded = false;
         this.renderNotificationPrompt();
       }
+      if (action === "open-notification-settings") hostBridge.openNotificationSettings();
       if (action === "toggle-notifications") {
         if (this.notificationSettings.authorization === "notDetermined" && !this.notificationSettings.enabled) {
           hostBridge.requestNotificationAuthorization();
@@ -695,7 +701,12 @@ class CodexUsageWidget extends HTMLElement {
   }
 
   handleNotificationSettings(payload = {}) {
-    this.notificationSettings = { ...this.notificationSettings, ...payload, error: payload.error || "" };
+    this.notificationSettings = {
+      ...this.notificationSettings,
+      ...payload,
+      error: payload.error || "",
+      notice: payload.notice || "",
+    };
     if (payload.enabled) this.data.capabilities.notificationPromptNeeded = false;
     this.renderNotificationSettings();
     this.renderNotificationPrompt();
@@ -710,20 +721,25 @@ class CodexUsageWidget extends HTMLElement {
     }
     const toggle = (action, label, checked, disabled = false) => `<button class="setting-switch compact-switch" data-action="${action}" type="button" role="switch" aria-label="${label}" aria-checked="${checked}" ${disabled ? "disabled" : ""}><span></span></button>`;
     const denied = this.notificationSettings.authorization === "denied";
+    const tray = this.notificationSettings.statusArea === "tray";
     container.innerHTML = `
       <div class="setting-row"><div class="setting-copy"><strong>额度通知</strong><span>${denied ? "系统已拒绝通知权限，请在系统设置中允许" : "低额度、耗尽和恢复时提醒"}</span></div>${toggle("toggle-notifications", "额度通知", this.notificationSettings.enabled, denied)}</div>
+      ${this.notificationSettings.settingsLaunchSupported ? '<button class="setting-test" data-action="open-notification-settings" type="button">Windows 通知设置</button>' : ""}
       <div class="setting-subrows ${this.notificationSettings.enabled ? "" : "is-disabled"}">
         <div><span>20% / 10% / 5% 阈值</span>${toggle("toggle-notify-thresholds", "额度阈值通知", this.notificationSettings.thresholds, !this.notificationSettings.enabled)}</div>
         <div><span>额度耗尽</span>${toggle("toggle-notify-exhausted", "额度耗尽通知", this.notificationSettings.exhausted, !this.notificationSettings.enabled)}</div>
         <div><span>额度恢复</span>${toggle("toggle-notify-restored", "额度恢复通知", this.notificationSettings.restored, !this.notificationSettings.enabled)}</div>
       </div>
-      <div class="setting-row"><div class="setting-copy"><strong>菜单栏额度</strong><span>显示 5 小时剩余百分比</span></div>${toggle("toggle-menubar", "菜单栏额度", this.notificationSettings.menuBarVisible)}</div>
+      <div class="setting-row"><div class="setting-copy"><strong>${tray ? "托盘百分比" : "菜单栏额度"}</strong><span>显示 5 小时剩余百分比</span></div>${toggle("toggle-menubar", tray ? "托盘百分比" : "菜单栏额度", this.notificationSettings.menuBarVisible)}</div>
       <button class="setting-test" data-action="test-notification" type="button" ${this.notificationSettings.enabled ? "" : "disabled"}>发送测试通知</button>
-      ${payloadError(this.notificationSettings.error)}
+      ${payloadStatus(this.notificationSettings.error, this.notificationSettings.notice)}
     `;
 
-    function payloadError(error) {
-      return error ? `<span class="setting-status is-error">${String(error).replaceAll("&", "&amp;").replaceAll("<", "&lt;")}</span>` : "";
+    function payloadStatus(error, notice) {
+      const message = error || notice;
+      if (!message) return "";
+      const escaped = String(message).replaceAll("&", "&amp;").replaceAll("<", "&lt;");
+      return `<span class="setting-status ${error ? "is-error" : ""}">${escaped}</span>`;
     }
   }
 

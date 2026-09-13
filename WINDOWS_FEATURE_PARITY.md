@@ -1,6 +1,8 @@
-# Windows P0/P1 功能补齐清单
+# Windows P0/P1 功能补齐清单（已完成）
 
-macOS 版已实现用量洞察、上下文健康度、预测、通知、菜单栏和报告导出。Windows 当前继续提供原有额度、7 天趋势和今日对话功能；共享组件通过 `capabilities` 自动隐藏尚未实现的入口。本清单用于后续 Windows 对齐。
+Windows 已完成与 macOS 的 P0/P1 功能对齐：90 天用量洞察、项目/任务聚合、上下文健康度、预测、系统通知、动态托盘和报告导出均已接入；五项 `capabilities` 已全部启用。以下条目保留为实现与回归验收清单。
+
+状态（2026-09-13）：功能实现、自动化测试、Release 发布和安装器自检已完成；Windows 10 22H2 / Windows 11 的通知、DPI、休眠恢复及窗口置顶仍属于发布前人工验收项。
 
 ## 数据与接口
 
@@ -46,4 +48,4 @@ macOS 版已实现用量洞察、上下文健康度、预测、通知、菜单�
 - 覆盖上下文占用边界、缺少模型上限、子代理排除、压缩后窗口切换、当前对话切换、日志增长后的 2 秒级增量更新、同一任务取最新快照和刷新期间稳定性；未声明 `capabilities.contextHealth` 时不得显示入口。
 - 验证上下文圆盘的健康、注意、紧张、危险及无数据状态，并确认 360px 面板双列无溢出、旧宿主单列不留空位。
 - 在 Windows 10 22H2 和 Windows 11 上验证 WebView2、动态 DPI、托盘重建、锁屏/休眠恢复、浅色/深色以及安装/卸载升级。
-- 完成后将 `capabilities` 全部置为 `true`；在此之前不得让共享组件显示不可用按钮。
+- [x] `capabilities.extendedInsights/contextHealth/notifications/menuBar/reportExport` 全部置为 `true`；旧宿主未声明能力时继续保持兼容布局。

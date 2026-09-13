@@ -14,6 +14,7 @@ internal sealed class CodexUsageService : IDisposable
 
     private readonly CodexExecutableLocator _locator;
     private readonly SessionStatsCache _sessionStats = new();
+    private readonly LiveContextReader _liveContextReader = new();
     private readonly SemaphoreSlim _serverGate = new(1, 1);
     private readonly ConcurrentDictionary<int, TaskCompletionSource<JsonObject>> _responses = new();
     private readonly StringBuilder _serverErrors = new();
@@ -43,7 +44,7 @@ internal sealed class CodexUsageService : IDisposable
         }
 
         var stats = await Task.Run(
-            () => _sessionStats.ReadToday(
+            () => _sessionStats.ReadRange(
                 Path.Combine(codexHome, "sessions"),
                 DateTimeOffset.Now,
                 TimeZoneInfo.Local),
@@ -139,6 +140,31 @@ internal sealed class CodexUsageService : IDisposable
         finally
         {
             _serverGate.Release();
+        }
+    }
+
+    public async Task<JsonObject?> FetchCurrentContextHealthAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var responses = await SendAccountRequestsAsync(
+                [new AppServerRequest("thread/list", new JsonObject
+                {
+                    ["limit"] = 8,
+                    ["sortKey"] = "recency_at",
+                    ["sortDirection"] = "desc",
+                    ["useStateDbOnly"] = true
+                })], cancellationToken);
+            var result = GetResult(responses[0], "当前对话");
+            if (result["data"] is not JsonArray threads) return null;
+            var current = threads.OfType<JsonObject>().FirstOrDefault(thread =>
+                thread["parentThreadId"] is null &&
+                !(thread["ephemeral"] is JsonValue value && value.TryGetValue<bool>(out var ephemeral) && ephemeral));
+            return current is null ? null : _liveContextReader.CreatePayload(current);
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            return null;
         }
     }
 
@@ -399,12 +425,20 @@ internal sealed class CodexUsageService : IDisposable
 
 internal static class UsagePayloadBuilder
 {
-    private const int HistoryDays = 7;
+    private const int HistoryDays = 90;
 
     public static JsonObject CreateLocal(
         SessionStats stats,
         IReadOnlyDictionary<string, string>? threadNames = null)
     {
+        var todayKey = stats.DailyTokens.LastOrDefault()?.Date ?? string.Empty;
+        // Older callers construct SessionStats without the per-conversation date.
+        var todayConversations = stats.Conversations.Where(item => string.IsNullOrEmpty(item.Date) || item.Date == todayKey).ToArray();
+        var projectPaths = stats.ProjectDailyTokens.Select(item => item.ProjectPath)
+            .Concat(stats.Conversations.Select(item => item.ProjectPath))
+            .Concat(stats.ContextHealth.Select(item => item.ProjectPath));
+        var projectNames = ProjectResolver.DisplayNames(projectPaths);
+        var tasks = BuildTasks(stats, projectNames, threadNames);
         return new JsonObject
         {
             ["today"] = new JsonObject
@@ -412,7 +446,7 @@ internal static class UsagePayloadBuilder
                 ["questions"] = stats.Questions,
                 ["tokens"] = stats.Tokens,
                 ["tokenSource"] = "local",
-                ["conversations"] = new JsonArray(stats.Conversations.Select(conversation =>
+                ["conversations"] = new JsonArray(todayConversations.Select(conversation =>
                     (JsonNode)CreateConversationPayload(conversation, threadNames)).ToArray())
             },
             ["history"] = new JsonObject
@@ -422,11 +456,122 @@ internal static class UsagePayloadBuilder
                     (JsonNode)new JsonObject
                     {
                         ["date"] = day.Date,
-                        ["tokens"] = day.Tokens
+                        ["tokens"] = day.Tokens,
+                        ["source"] = day.Source
                     }).ToArray())
+            },
+            ["insights"] = new JsonObject
+            {
+                ["localOnly"] = true,
+                ["projects"] = new JsonArray(projectNames.OrderBy(pair => pair.Value, StringComparer.CurrentCulture).Select(pair =>
+                {
+                    var project = new JsonObject
+                    {
+                        ["key"] = pair.Key,
+                        ["name"] = pair.Value,
+                        ["projectKind"] = ProjectResolver.Kind(pair.Key)
+                    };
+                    if (pair.Key != ProjectResolver.NonProjectKey) project["path"] = pair.Key;
+                    return (JsonNode)project;
+                }).ToArray()),
+                ["tasks"] = new JsonArray(tasks.Cast<JsonNode>().ToArray())
+            },
+            ["contextHealth"] = new JsonObject
+            {
+                ["source"] = "local",
+                ["sessions"] = new JsonArray(stats.ContextHealth
+                    .Where(item => item.MaxTokens > 0)
+                    .OrderByDescending(item => item.UpdatedAt)
+                    .Take(20)
+                    .Select(item => (JsonNode)CreateContextPayload(item, projectNames, threadNames)).ToArray())
             }
         };
     }
+
+    private static JsonObject[] BuildTasks(SessionStats stats, IReadOnlyDictionary<string, string> projectNames, IReadOnlyDictionary<string, string>? threadNames)
+    {
+        var rows = new Dictionary<string, JsonObject>(StringComparer.OrdinalIgnoreCase);
+        foreach (var conversation in stats.Conversations)
+        {
+            var taskId = conversation.ThreadId ?? conversation.ContextWindowId ?? conversation.TurnId;
+            var key = $"{conversation.Date}\0{conversation.ProjectPath}\0{taskId}";
+            if (!rows.TryGetValue(key, out var row))
+            {
+                row = new JsonObject
+                {
+                    ["date"] = conversation.Date,
+                    ["projectKey"] = conversation.ProjectPath,
+                    ["projectName"] = projectNames.GetValueOrDefault(conversation.ProjectPath, "未识别项目"),
+                    ["projectKind"] = ProjectResolver.Kind(conversation.ProjectPath),
+                    ["taskId"] = taskId,
+                    ["name"] = conversation.Preview,
+                    ["turns"] = 0,
+                    ["tokens"] = 0L,
+                    ["lastActive"] = conversation.StartedAt.ToString("O", CultureInfo.InvariantCulture),
+                    ["kind"] = "user"
+                };
+                rows[key] = row;
+            }
+            row["turns"] = ReadLong(row["turns"]) + 1;
+            row["tokens"] = ReadLong(row["tokens"]) + Math.Max(0, conversation.Tokens ?? 0);
+            if (conversation.ThreadId is string threadId && threadNames?.TryGetValue(threadId, out var threadName) is true) row["name"] = threadName;
+            var active = conversation.StartedAt.ToString("O", CultureInfo.InvariantCulture);
+            if (string.CompareOrdinal(active, StringValue(row["lastActive"])) > 0) row["lastActive"] = active;
+        }
+
+        var attributed = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in rows.Values)
+        {
+            var key = $"{StringValue(row["date"])}\0{StringValue(row["projectKey"])}";
+            attributed[key] = attributed.GetValueOrDefault(key) + ReadLong(row["tokens"]);
+        }
+        foreach (var project in stats.ProjectDailyTokens)
+        {
+            var key = $"{project.Date}\0{project.ProjectPath}";
+            var gap = Math.Max(0, project.Tokens - attributed.GetValueOrDefault(key));
+            if (gap == 0) continue;
+            rows[$"{key}\0system"] = new JsonObject
+            {
+                ["date"] = project.Date,
+                ["projectKey"] = project.ProjectPath,
+                ["projectName"] = projectNames.GetValueOrDefault(project.ProjectPath, "未识别项目"),
+                ["projectKind"] = ProjectResolver.Kind(project.ProjectPath),
+                ["taskId"] = "system",
+                ["name"] = "系统/子代理活动",
+                ["turns"] = 0,
+                ["tokens"] = gap,
+                ["lastActive"] = "",
+                ["kind"] = "system"
+            };
+        }
+        return rows.Values.OrderByDescending(row => StringValue(row["date"])).ThenByDescending(row => ReadLong(row["tokens"])).ToArray();
+    }
+
+    private static JsonObject CreateContextPayload(ContextHealthStats context, IReadOnlyDictionary<string, string> projectNames, IReadOnlyDictionary<string, string>? threadNames)
+    {
+        var usedPercent = Math.Clamp((double)context.UsedTokens / context.MaxTokens * 100, 0, 100);
+        var taskId = context.ThreadId ?? context.ContextWindowId ?? $"context-{context.UpdatedAt.ToUnixTimeSeconds()}";
+        return new JsonObject
+        {
+            ["taskId"] = taskId,
+            ["threadId"] = context.ThreadId,
+            ["contextWindowId"] = context.ContextWindowId,
+            ["name"] = context.ThreadId is string threadId && threadNames?.TryGetValue(threadId, out var name) is true ? name : context.Preview,
+            ["projectKey"] = context.ProjectPath,
+            ["projectName"] = projectNames.GetValueOrDefault(context.ProjectPath, "未识别项目"),
+            ["projectKind"] = ProjectResolver.Kind(context.ProjectPath),
+            ["usedTokens"] = context.UsedTokens,
+            ["maxTokens"] = context.MaxTokens,
+            ["usedPercent"] = usedPercent,
+            ["remainingPercent"] = Math.Max(0, 100 - usedPercent),
+            ["status"] = SessionStatsReader.ContextHealthStatus(usedPercent),
+            ["lastActive"] = context.UpdatedAt.ToString("O", CultureInfo.InvariantCulture),
+            ["compactions"] = context.Compactions
+        };
+    }
+
+    private static long ReadLong(JsonNode? node) => node is JsonValue value && value.TryGetValue<long>(out var number) ? number : 0;
+    private static string StringValue(JsonNode? node) => node is JsonValue value && value.TryGetValue<string>(out var text) ? text : string.Empty;
 
     private static JsonObject CreateConversationPayload(
         ConversationStats conversation,
@@ -490,11 +635,11 @@ internal static class UsagePayloadBuilder
                     {
                         if (bucketValues.TryGetValue(dateKey, out var accountTokens))
                         {
-                            return new DailyTokenStats(dateKey, accountTokens);
+                            return new DailyTokenStats(dateKey, accountTokens, "account");
                         }
                         var localTokens = localValues.GetValueOrDefault(dateKey);
                         if (localTokens > 0) localFallback = true;
-                        return new DailyTokenStats(dateKey, localTokens);
+                        return new DailyTokenStats(dateKey, localTokens, localTokens > 0 ? "local" : "empty");
                     })
                     .ToArray();
                 payload["history"] = new JsonObject
@@ -505,7 +650,8 @@ internal static class UsagePayloadBuilder
                         (JsonNode)new JsonObject
                         {
                             ["date"] = day.Date,
-                            ["tokens"] = day.Tokens
+                            ["tokens"] = day.Tokens,
+                            ["source"] = day.Source
                         }).ToArray())
                 };
                 var today = (JsonObject)payload["today"]!;

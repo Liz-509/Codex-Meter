@@ -12,7 +12,7 @@ Codex Meter 是一款适用于 macOS 和 Windows 的轻量级 Codex 原生用量
 - 无需打开 Codex，即可掌握今日 Token 用量和对话轮次。
 - 查看账户级最近 7/30/90 天 Token 趋势和热力图；账户数据缺失或延迟时，由本地会话历史补齐。
 - 按本机项目和 Codex 任务分析 Token、轮次与最近活动，并导出最近 7 天 Markdown/CSV 报告。
-- macOS 菜单栏常驻显示 5 小时额度，并根据近期速度估算是否会在重置前耗尽。
+- 在 macOS 菜单栏或 Windows 系统托盘显示 5 小时额度，并根据近期速度估算是否会在重置前耗尽。
 - 经用户主动授权后，在额度跌破 20%、10%、5%、耗尽或新周期恢复时发送系统通知。
 - 浏览今天的本地对话轮次，优先按 Codex 任务合并，并在可用时显示对应的任务名称。
 - 在 5 小时额度右侧通过剩余圆盘查看当前 Codex 任务的上下文健康度，并展开检查最近任务的窗口占用和压缩次数。
@@ -49,7 +49,7 @@ Codex Meter 在首次同步成功后每分钟自动刷新一次。刚启动且�
 
 额度低于 20% 时指示器变为黄色，低于 10% 时变为红色。重置时间以相对倒计时显示。“今日对话”窗口优先按 Codex 任务 ID 合并压缩前后的上下文窗口，展示每个任务的时间范围和 Token 总数，并可展开查看单轮详情；旧载荷缺少任务 ID 时才按上下文窗口分组。如果本地 App Server 能够匹配任务，就会使用 Codex 任务名称；否则回退到第一条本地提示词。
 
-上下文健康度使用 Codex 日志中模型直接上报的当前窗口 Token 和上下文上限计算。主面板在 5 小时额度右侧用圆盘显示当前上下文的剩余比例，点击整个模块可查看详情；未取得数据时显示中性圆盘。macOS 会按 App Server 的最近交互顺序识别当前对话，并只读取对应会话文件尾部，约每 2 秒更新一次；切换或继续一个对话后会自动跟随。已用比例低于 60% 为“健康”，60%–79% 为“注意”，80%–89% 为“紧张”，90% 及以上为“危险”。上下文压缩后会按新窗口重新计算；该指标只反映当前上下文占用，不代表账户额度。
+上下文健康度使用 Codex 日志中模型直接上报的当前窗口 Token 和上下文上限计算。主面板在 5 小时额度右侧用圆盘显示当前上下文的剩余比例，点击整个模块可查看详情；未取得数据时显示中性圆盘。macOS 与 Windows 都会按 App Server 的最近交互顺序识别当前对话，并只读取对应会话文件尾部，约每 2 秒更新一次；切换或继续一个对话后会自动跟随。已用比例低于 60% 为“健康”，60%–79% 为“注意”，80%–89% 为“紧张”，90% 及以上为“危险”。上下文压缩后会按新窗口重新计算；该指标只反映当前上下文占用，不代表账户额度。
 
 ## 额度重置次数
 
@@ -69,7 +69,7 @@ Codex Meter 会先读取本地会话统计，因此在账户额度仍在同步�
 
 结构化会话文件来自 `~/.codex/sessions`；设置 `CODEX_HOME` 后则读取 `$CODEX_HOME/sessions`。应用最多分析最近 90 天并缓存未变化的文件。“今日”和日期范围均以设备当前的本地时区为准。项目与任务统计仅来自当前电脑，可能小于账户级每日总量。
 
-macOS 版会在本机 Application Support 中保存最多 14 天的轻量额度百分比快照，用于趋势估算。快照不包含提示词、文件内容或账户凭据。通知默认关闭，只有在应用内确认并取得系统授权后才会启用。
+两个平台都会在各自的本地应用数据目录中保存最多 14 天的轻量额度百分比快照，用于趋势估算。快照不包含提示词、文件内容或账户凭据。通知默认关闭，只有在应用内确认并取得系统授权后才会启用。
 
 ## 平台行为
 
@@ -78,7 +78,7 @@ macOS 版会在本机 Application Support 中保存最多 14 天的轻量额度�
 | 支持系统 | macOS 13 或更高版本，Apple Silicon 或 Intel | Windows 10 22H2 或 Windows 11，x64 |
 | 窗口行为 | 悬浮于其他窗口之上，并出现在所有 Spaces 和全屏应用中 | 在当前虚拟桌面保持置顶 |
 | 后台交互 | 其他应用处于活动状态时仍可点击 | 其他应用处于活动状态时仍可点击 |
-| 系统集成 | Dock、可选菜单栏百分比、本地通知和报告导出 | 系统托盘提供**显示 Codex Meter**和**退出**菜单；双击托盘图标可显示面板 |
+| 系统集成 | Dock、可选菜单栏百分比、本地通知和报告导出 | 始终保留系统托盘入口，可选百分比图标，并提供额度/预测、通知、设置、刷新、报告导出及面板控制 |
 | 重复启动 | 由 macOS 正常处理已运行的应用 | 单实例保护会阻止重复进程，并通知已有实例显示面板 |
 | Web 运行时 | 使用系统 WKWebView | 使用 Microsoft Edge WebView2；缺少运行时时会提供官方下载入口 |
 
@@ -89,7 +89,7 @@ Windows 没有与 macOS“所有 Spaces”对应的稳定公开能力，独占�
 - [macOS Apple Silicon 安装包 — Codex Meter v1.4.1](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.1/Codex-Meter-macOS-arm64-v1.4.1.dmg)
 - [Windows 10/11 x64 安装包 — Codex Meter v1.4.1](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.1/Codex-Meter-Windows-x64-v1.4.1.exe)
 
-macOS 用户打开下载的 DMG，将 `Codex Meter` 拖到“应用程序”快捷方式，再从“应用程序”中启动。Windows 用户打开下载的安装 EXE 并按提示操作；可以选择安装位置以及是否创建桌面快捷方式。应用会添加到开始菜单，也可以从 Windows 的“已安装的应用”中卸载；卸载程序可选择保留或移除 Codex Meter 的本地偏好设置，不会影响 Codex 会话。Intel Mac 用户可以从源码构建安装包。
+macOS 用户打开下载的 DMG，将 `Codex Meter` 拖到“应用程序”快捷方式，再从“应用程序”中启动。Windows 用户打开下载的安装 EXE 并按提示操作；可以选择安装位置以及是否创建桌面快捷方式。轻量安装程序只会在系统缺失依赖时下载 .NET 8 Desktop Runtime 和共享 Windows App Runtime，因此首次安装可能需要联网；随后会添加开始菜单入口，并注册到 Windows“已安装的应用”。卸载 Codex Meter 时不会移除共享运行时；卸载程序可选择保留或移除应用偏好设置，不会影响 Codex 会话。Intel Mac 用户可以从源码构建安装包。
 
 由于 macOS 应用尚未公证，首次启动时系统可能要求确认。按住 Control 点击应用，选择**打开**，然后再次确认**打开**。
 
@@ -160,7 +160,7 @@ DMG 安装包会生成到 `outputs/Codex-Meter-macOS-<架构>-v<版本>.dmg`，�
 .\scripts\build-windows.ps1
 ```
 
-自包含 x64 应用会生成到 `build\windows\win-x64`，图形化安装程序会生成到 `outputs\Codex-Meter-Windows-x64-v1.4.1.exe`。打开 EXE 即可为当前 Windows 账户安装 Codex Meter。安装程序会将应用添加到开始菜单，并在 Windows“已安装的应用”中注册升级和卸载入口。
+依赖共享运行时的 x64 应用会生成到 `build\windows\win-x64`，轻量图形化安装程序会生成到 `outputs\Codex-Meter-Windows-x64-v1.4.1.exe`。安装程序只内嵌压缩后的应用文件，并设有 10 MB 构建体积上限；首次安装时仅在缺失的情况下下载 .NET 8 Desktop Runtime 和 Windows App Runtime 2.4。打开 EXE 即可为当前 Windows 账户安装 Codex Meter；安装程序会添加开始菜单入口，并在 Windows“已安装的应用”中注册升级和卸载信息。
 
 ## 可嵌入的 Web 组件
 
@@ -172,7 +172,7 @@ python3 -m http.server 4173
 
 然后打开 `http://localhost:4173`。
 
-原生宿主可以实现 `window.codexMeterBridge`，提供 `getUsage`、`consumeReset`、`resize` 和 `quit`；如需原生拖动支持，还可以提供 `beginDrag`。重置结果通过 `window.codexResetResult(payload)` 返回。旧版 `window.codexUsageBridge.getUsage()` 钩子仍受支持。Web 宿主可以提供匹配的 `GET /api/usage`，也可以直接推送数据：
+原生宿主可以实现 `window.codexMeterBridge`，提供 `getUsage`、`consumeReset`、`resize`、`quit`、通知设置方法、`setMenuBarVisible` 和 `exportReport`；如需原生拖动支持，还可以提供 `beginDrag`。重置、通知设置、导出及实时上下文结果分别通过 `window.codexResetResult(payload)`、`window.codexNotificationSettingsResult(payload)`、`window.codexExportResult(payload)` 与 `window.updateCodexContextHealth(payload)` 返回。旧版 `window.codexUsageBridge.getUsage()` 钩子仍受支持。Web 宿主可以提供匹配的 `GET /api/usage`，也可以直接推送数据：
 
 ```js
 window.updateCodexUsage(payload);
@@ -181,7 +181,7 @@ window.recordCodexTurn({ inputTokens: 1200, outputTokens: 480 });
 
 宿主可以在用量载荷中选择性提供 `today.tokenSource`、`today.conversations` 和 `history.dailyTokens`，以填充详情对话框。对话条目可以包含 `contextWindowId` 和 `threadName`；对旧载荷分组时，组件会依次回退到 `threadId` 和 `turnId`，任务名称不可用时则使用第一条提示词。旧版载荷仍然兼容；缺少这些字段时，详情界面会显示为空状态。
 
-扩展宿主还可以提供 `insights.projects`、`insights.tasks`、`contextHealth.sessions`、`forecast.primary`、`forecast.secondary` 和能力标志。上下文条目包含任务/项目标识、`usedTokens`、`maxTokens`、`usedPercent`、`remainingPercent`、`status`、`lastActive` 与 `compactions`；只有声明 `capabilities.contextHealth` 才会在 5 小时额度右侧显示上下文剩余圆盘。项目和任务条目可用 `projectKind` 标记 `project` 或 `non_project`；macOS 将不能解析到 Git 根目录的会话统一显示为“非项目中对话”。刷新期间的 `partial` 载荷只用于冷启动占位，已有完整快照时不会覆盖稳定的历史、任务或上下文健康数据。未声明 `capabilities.extendedInsights` 时，共享组件继续显示旧版 7 天图表，避免 Windows 和嵌入式旧宿主出现不可用入口。
+扩展宿主还可以提供 `insights.projects`、`insights.tasks`、`contextHealth.sessions`、`forecast.primary`、`forecast.secondary` 和能力标志。上下文条目包含任务/项目标识、`usedTokens`、`maxTokens`、`usedPercent`、`remainingPercent`、`status`、`lastActive` 与 `compactions`；只有声明 `capabilities.contextHealth` 才会在 5 小时额度右侧显示上下文剩余圆盘。项目和任务条目可用 `projectKind` 标记 `project` 或 `non_project`；桌面宿主将不能解析到 Git 根目录的会话统一显示为“非项目中对话”。刷新期间的 `partial` 载荷只用于冷启动占位，已有完整快照时不会覆盖稳定的历史、任务、上下文、预测或报告数据。未声明 `capabilities.extendedInsights` 时，共享组件继续显示旧版 7 天图表，避免嵌入式旧宿主出现不可用入口。
 
 ## 隐私
 

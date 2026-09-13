@@ -30,7 +30,7 @@ public sealed class SessionStatsReaderTests
 
             Assert.AreEqual(1, stats.Questions);
             Assert.AreEqual(80L, stats.Tokens);
-            Assert.AreEqual(7, stats.DailyTokens.Count);
+            Assert.AreEqual(90, stats.DailyTokens.Count);
             Assert.AreEqual("2026-09-10", stats.DailyTokens[^2].Date);
             Assert.AreEqual(100L, stats.DailyTokens[^2].Tokens);
             Assert.AreEqual("2026-09-11", stats.DailyTokens[^1].Date);

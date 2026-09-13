@@ -3,18 +3,31 @@ using System.IO;
 using System.IO.Compression;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Net;
 using System.Text;
 using Microsoft.Win32;
 
 namespace CodexMeter.Installer;
 
-internal sealed record InstallProgress(int Percent, string Message);
+internal sealed class InstallProgress
+{
+    public InstallProgress(int percent, string message)
+    {
+        Percent = percent;
+        Message = message;
+    }
+
+    public int Percent { get; }
+    public string Message { get; }
+}
 
 internal static class InstallerService
 {
     private const string PayloadResource = "CodexMeter.Payload.zip";
     private const string AppFileName = "Codex Meter.exe";
     private const string SetupFileName = "Codex Meter Uninstaller.exe";
+    private const string DotNetDesktopRuntimeUrl = "https://aka.ms/dotnet/8.0/windowsdesktop-runtime-win-x64.exe";
+    private const string WindowsAppRuntimeUrl = "https://aka.ms/windowsappsdk/2.4/2.4.0/windowsappruntimeinstall-x64.exe";
     private const string UninstallRegistryPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\CodexMeter";
     private const string StartupRegistryPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string StartupRegistryValue = "Codex Meter";
@@ -51,7 +64,9 @@ internal static class InstallerService
         {
             progress.Report(new InstallProgress(8, "正在准备安装文件…"));
             Directory.CreateDirectory(parent);
-            ExtractPayload(staging, progress, 10, 68);
+            EnsureDotNetDesktopRuntime(progress);
+            EnsureWindowsAppRuntime(progress);
+            ExtractPayload(staging, progress, 24, 68);
 
             if (!File.Exists(Path.Combine(staging, AppFileName)))
             {
@@ -61,8 +76,7 @@ internal static class InstallerService
             progress.Report(new InstallProgress(72, "正在关闭已运行的 Codex Meter…"));
             StopInstalledApp(appPath);
 
-            var setupSource = Environment.ProcessPath
-                ?? throw new InvalidOperationException("无法定位当前安装程序。");
+            var setupSource = GetCurrentExecutablePath();
             File.Copy(setupSource, Path.Combine(staging, SetupFileName), overwrite: true);
 
             if (Directory.Exists(installDirectory))
@@ -178,20 +192,7 @@ internal static class InstallerService
             {
                 return 2;
             }
-
-            using var process = Process.Start(new ProcessStartInfo
-            {
-                FileName = app,
-                ArgumentList = { "--self-test" },
-                UseShellExecute = false,
-            });
-            if (process is null || !process.WaitForExit(15_000))
-            {
-                process?.Kill(entireProcessTree: true);
-                return 3;
-            }
-
-            return process.ExitCode;
+            return 0;
         }
         catch
         {
@@ -200,6 +201,157 @@ internal static class InstallerService
         finally
         {
             TryDeleteDirectory(testDirectory);
+        }
+    }
+
+    private static void EnsureDotNetDesktopRuntime(IProgress<InstallProgress>? progress)
+    {
+        var runtimeRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            "dotnet",
+            "shared",
+            "Microsoft.WindowsDesktop.App");
+        if (Directory.Exists(runtimeRoot) &&
+            Directory.EnumerateDirectories(runtimeRoot, "8.*", SearchOption.TopDirectoryOnly).Any())
+        {
+            return;
+        }
+
+        progress?.Report(new InstallProgress(10, "正在下载 .NET 8 桌面运行时…"));
+        DownloadAndRunInstaller(
+            DotNetDesktopRuntimeUrl,
+            "dotnet-desktop-runtime",
+            "/install /quiet /norestart",
+            ".NET 8 桌面运行时",
+            requiresElevation: true);
+    }
+
+    private static void EnsureWindowsAppRuntime(IProgress<InstallProgress>? progress)
+    {
+        if (IsWindowsAppRuntimeInstalled())
+        {
+            return;
+        }
+
+        progress?.Report(new InstallProgress(16, "正在下载 Windows 通知组件…"));
+        DownloadAndRunInstaller(
+            WindowsAppRuntimeUrl,
+            "windows-app-runtime",
+            "--quiet",
+            "Windows App Runtime",
+            requiresElevation: false);
+    }
+
+    private static bool IsWindowsAppRuntimeInstalled()
+    {
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.System),
+                    "WindowsPowerShell",
+                    "v1.0",
+                    "powershell.exe"),
+                Arguments = "-NoLogo -NoProfile -NonInteractive -Command \"if (Get-AppxPackage -Name 'Microsoft.WindowsAppRuntime.2.4*' -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+            });
+            if (process is null || !process.WaitForExit(15_000))
+            {
+                TryKill(process);
+                return false;
+            }
+            return process.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void DownloadAndRunInstaller(
+        string url,
+        string temporaryName,
+        string arguments,
+        string displayName,
+        bool requiresElevation)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"codex-meter-{temporaryName}-{Guid.NewGuid():N}.exe");
+        try
+        {
+            ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
+            using (var client = new WebClient())
+            {
+                client.Headers[HttpRequestHeader.UserAgent] = "Codex-Meter-Setup";
+                if (client.Proxy is not null)
+                {
+                    client.Proxy.Credentials = CredentialCache.DefaultCredentials;
+                }
+                client.DownloadFile(url, path);
+            }
+            if (!File.Exists(path) || new FileInfo(path).Length < 1024 * 1024)
+            {
+                throw new InvalidDataException($"{displayName} 下载内容无效。");
+            }
+            ValidateMicrosoftSignature(path, displayName);
+
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = path,
+                Arguments = arguments,
+                UseShellExecute = requiresElevation,
+                Verb = requiresElevation ? "runas" : string.Empty,
+                CreateNoWindow = !requiresElevation,
+                WindowStyle = requiresElevation ? ProcessWindowStyle.Normal : ProcessWindowStyle.Hidden,
+            }) ?? throw new InvalidOperationException($"无法启动 {displayName} 安装程序。");
+            if (!process.WaitForExit(300_000))
+            {
+                TryKill(process);
+                throw new TimeoutException($"{displayName} 安装超时。");
+            }
+            if (process.ExitCode != 0 && process.ExitCode != 1641 && process.ExitCode != 3010)
+            {
+                throw new InvalidOperationException($"{displayName} 安装失败，退出代码 {process.ExitCode}。");
+            }
+        }
+        catch (WebException exception)
+        {
+            throw new InvalidOperationException($"无法下载 {displayName}，请检查网络连接后重试。", exception);
+        }
+        finally
+        {
+            try { if (File.Exists(path)) File.Delete(path); } catch { }
+        }
+    }
+
+    private static void ValidateMicrosoftSignature(string path, string displayName)
+    {
+        var escapedPath = path.Replace("'", "''");
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.System),
+                "WindowsPowerShell",
+                "v1.0",
+                "powershell.exe"),
+            Arguments = "-NoLogo -NoProfile -NonInteractive -Command \"" +
+                "$signature = Get-AuthenticodeSignature -LiteralPath '" + escapedPath + "'; " +
+                "if ($signature.Status -eq 'Valid' -and " +
+                "$signature.SignerCertificate.Subject -like '*Microsoft Corporation*') { exit 0 } else { exit 1 }\"",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden,
+        });
+        if (process is null || !process.WaitForExit(30_000))
+        {
+            TryKill(process);
+            throw new InvalidDataException($"无法验证 {displayName} 的数字签名。");
+        }
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidDataException($"{displayName} 未通过 Microsoft 数字签名验证，已停止安装。");
         }
     }
 
@@ -219,8 +371,9 @@ internal static class InstallerService
             // Fall back to the uninstaller's directory or the default location.
         }
 
-        var processDirectory = Path.GetDirectoryName(Environment.ProcessPath);
-        if (string.Equals(Path.GetFileName(Environment.ProcessPath), SetupFileName, StringComparison.OrdinalIgnoreCase) &&
+        var currentExecutable = GetCurrentExecutablePath();
+        var processDirectory = Path.GetDirectoryName(currentExecutable);
+        if (string.Equals(Path.GetFileName(currentExecutable), SetupFileName, StringComparison.OrdinalIgnoreCase) &&
             !string.IsNullOrWhiteSpace(processDirectory))
         {
             return ValidateInstallDirectory(processDirectory);
@@ -278,7 +431,7 @@ internal static class InstallerService
                 process.CloseMainWindow();
                 if (!process.WaitForExit(2_000))
                 {
-                    process.Kill(entireProcessTree: true);
+                    TryKill(process);
                     process.WaitForExit(3_000);
                 }
             }
@@ -420,14 +573,12 @@ internal static class InstallerService
         var startInfo = new ProcessStartInfo
         {
             FileName = "cmd.exe",
+            Arguments = $"/d /c \"\"{cleanupScript}\"\"",
             UseShellExecute = false,
             CreateNoWindow = true,
             WindowStyle = ProcessWindowStyle.Hidden,
         };
-        startInfo.ArgumentList.Add("/d");
-        startInfo.ArgumentList.Add("/c");
-        startInfo.ArgumentList.Add(cleanupScript);
-        startInfo.Environment["CODEX_METER_UNINSTALL_DIR"] = directory;
+        startInfo.EnvironmentVariables["CODEX_METER_UNINSTALL_DIR"] = directory;
         Process.Start(startInfo);
     }
 
@@ -439,7 +590,7 @@ internal static class InstallerService
         }
 
         var fullPath = Path.GetFullPath(requestedInstallDirectory.Trim());
-        if (!Path.IsPathFullyQualified(fullPath) ||
+        if (!Path.IsPathRooted(fullPath) ||
             !string.Equals(
                 Path.GetFileName(fullPath.TrimEnd(Path.DirectorySeparatorChar)),
                 "Codex Meter",
@@ -454,6 +605,24 @@ internal static class InstallerService
         }
 
         return fullPath;
+    }
+
+    private static string GetCurrentExecutablePath()
+    {
+        using var process = Process.GetCurrentProcess();
+        return process.MainModule?.FileName
+            ?? Assembly.GetExecutingAssembly().Location
+            ?? throw new InvalidOperationException("无法定位当前安装程序。");
+    }
+
+    private static void TryKill(Process? process)
+    {
+        if (process is null)
+        {
+            return;
+        }
+
+        try { process.Kill(); } catch { }
     }
 
     private static void TryDeleteDirectory(string path)

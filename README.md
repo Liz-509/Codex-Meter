@@ -12,7 +12,7 @@ Codex Meter is a lightweight native usage widget for Codex on macOS and Windows.
 - Track today's tokens and conversation turns without opening Codex.
 - Open account-wide 7/30/90-day token trends and heatmaps, with local session history filling gaps when account data is unavailable or delayed.
 - Break down local tokens and turns by project and Codex task, then export a rolling seven-day Markdown or CSV report.
-- On macOS, keep the five-hour allowance in the menu bar, forecast exhaustion from recent pace, and opt into threshold, exhaustion, and recovery notifications.
+- Keep the five-hour allowance in the macOS menu bar or Windows system tray, forecast exhaustion from recent pace, and opt into threshold, exhaustion, and recovery notifications.
 - Browse today's local conversation turns, merged by Codex task and labeled with the corresponding task name when available.
 - See the current task's context remaining in a dial beside the five-hour allowance, then open details for recent window occupancy and compaction counts.
 - Redeem an available reset credit after an explicit confirmation. Codex Meter never consumes a credit automatically.
@@ -48,7 +48,7 @@ Codex Meter refreshes automatically every minute after its first successful sync
 
 Quota indicators are yellow below 20% remaining and red below 10%. Reset times are displayed as relative countdowns. The Today Conversations dialog groups turns by Codex task ID, merging context windows from before and after compaction, and falls back to context-window grouping only for legacy payloads without a task ID. Each group shows its time range and token total and can be expanded to inspect individual turns. It uses the Codex task name when the local App Server can match one; otherwise it falls back to the first local prompt.
 
-Context health uses the current-window token count and context limit reported directly in Codex session events. The main panel shows context remaining as a dial beside the five-hour allowance; the whole module opens details, and a neutral dial is shown until data is available. On macOS, Codex Meter follows the App Server's most recently interacted-with task and reads only the tail of that session file about every two seconds, so switching to or continuing a task updates the card automatically. Usage below 60% is Healthy, 60–79% is Attention, 80–89% is High, and 90% or above is Critical. After context compaction, health is recalculated from the new window. This metric describes context occupancy, not account quota.
+Context health uses the current-window token count and context limit reported directly in Codex session events. The main panel shows context remaining as a dial beside the five-hour allowance; the whole module opens details, and a neutral dial is shown until data is available. On macOS and Windows, Codex Meter follows the App Server's most recently interacted-with task and reads only the tail of that session file about every two seconds, so switching to or continuing a task updates the card automatically. Usage below 60% is Healthy, 60–79% is Attention, 80–89% is High, and 90% or above is Critical. After context compaction, health is recalculated from the new window. This metric describes context occupancy, not account quota.
 
 ## Reset credits
 
@@ -68,7 +68,7 @@ Codex Meter reads local session statistics first, so today's activity can appear
 
 Structured session files are scanned from `~/.codex/sessions`, or from `$CODEX_HOME/sessions` when `CODEX_HOME` is set. Codex Meter analyzes up to 90 days and caches unchanged files between refreshes. Dates and “today” use the device's current local time zone. Project and task statistics are local-only and may be lower than account-wide daily totals.
 
-On macOS, up to 14 days of lightweight quota-percentage snapshots are stored in Application Support for trend forecasting. They contain no prompts, file contents, or credentials. Notifications remain off until the user opts in and grants system permission.
+On both platforms, up to 14 days of lightweight quota-percentage snapshots are stored in the platform's local application-data folder for trend forecasting. They contain no prompts, file contents, or credentials. Notifications remain off until the user opts in and grants system permission.
 
 ## Platform behavior
 
@@ -77,7 +77,7 @@ On macOS, up to 14 days of lightweight quota-percentage snapshots are stored in 
 | Supported systems | macOS 13 or later, Apple Silicon or Intel | Windows 10 22H2 or Windows 11, x64 |
 | Window behavior | Floats above other windows and appears across Spaces and full-screen apps | Stays on top on the current virtual desktop |
 | Background access | Remains clickable when another app is active | Remains clickable when another app is active |
-| System integration | Dock presence plus an optional menu-bar percentage, local notifications, and report export | System tray menu with **Show Codex Meter** and **Exit**; double-clicking the tray icon shows the panel |
+| System integration | Dock presence plus an optional menu-bar percentage, local notifications, and report export | Always-available system tray with optional percentage icon, quota/forecast details, local notifications, settings, refresh, report export, and panel controls |
 | Multiple launches | macOS handles the running app normally | A single-instance guard prevents duplicates and asks the existing instance to show itself |
 | Web runtime | Uses the system WKWebView | Uses Microsoft Edge WebView2 and offers the official download page when the runtime is missing |
 
@@ -88,7 +88,7 @@ Windows does not expose a stable public equivalent of macOS “all Spaces,” an
 - [macOS Apple Silicon installer — Codex Meter v1.4.1](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.1/Codex-Meter-macOS-arm64-v1.4.1.dmg)
 - [Windows 10/11 x64 installer — Codex Meter v1.4.1](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.1/Codex-Meter-Windows-x64-v1.4.1.exe)
 
-On macOS, open the downloaded DMG and drag `Codex Meter` to the Applications shortcut, then launch it from Applications. On Windows, open the downloaded setup EXE and follow the installer; you can choose the installation location and whether to create a desktop shortcut. The app is added to the Start menu and can be removed from **Installed apps**; the uninstaller can either preserve or remove Codex Meter's local preferences without touching Codex sessions. Intel Mac users can build an installer from source.
+On macOS, open the downloaded DMG and drag `Codex Meter` to the Applications shortcut, then launch it from Applications. On Windows, open the downloaded setup EXE and follow the installer; you can choose the installation location and whether to create a desktop shortcut. The lightweight setup downloads .NET 8 Desktop Runtime and the shared Windows App Runtime only when they are missing, so an internet connection may be required on first install. It then adds the app to the Start menu and registers it in **Installed apps**. Uninstalling Codex Meter does not remove shared runtimes and can preserve or remove the app's local preferences without touching Codex sessions. Intel Mac users can build an installer from source.
 
 Because the macOS app is not notarized, macOS may ask you to confirm the first launch. Control-click the app, choose **Open**, then confirm **Open**.
 
@@ -159,7 +159,7 @@ Install the .NET 8 SDK, clone the repository, and run the following command in P
 .\scripts\build-windows.ps1
 ```
 
-The self-contained x64 app is written to `build\windows\win-x64`, and the graphical installer is written to `outputs\Codex-Meter-Windows-x64-v1.4.1.exe`. Open the EXE to install Codex Meter for the current Windows account. The installer adds the app to the Start menu and registers it with Windows **Installed apps** for upgrades and removal.
+The framework-dependent x64 app is written to `build\windows\win-x64`, and the lightweight graphical installer is written to `outputs\Codex-Meter-Windows-x64-v1.4.1.exe`. The installer embeds only the compressed app payload and has a 10 MB build-time size budget. On first install it downloads .NET 8 Desktop Runtime and Windows App Runtime 2.4 only if they are missing. Open the EXE to install Codex Meter for the current Windows account. The installer adds the app to the Start menu and registers it with Windows **Installed apps** for upgrades and removal.
 
 ## Embeddable web component
 
@@ -171,7 +171,7 @@ python3 -m http.server 4173
 
 Then open `http://localhost:4173`.
 
-A native host can implement `window.codexMeterBridge` with `getUsage`, `consumeReset`, `resize`, and `quit`. Native drag support can additionally provide `beginDrag`. Reset results are delivered through `window.codexResetResult(payload)`. The legacy `window.codexUsageBridge.getUsage()` hook remains supported. A web host can provide a matching `GET /api/usage`, or push data directly:
+A native host can implement `window.codexMeterBridge` with `getUsage`, `consumeReset`, `resize`, `quit`, notification-setting methods, `setMenuBarVisible`, and `exportReport`. Native drag support can additionally provide `beginDrag`. Reset, notification-setting, export, and live-context results are delivered through `window.codexResetResult(payload)`, `window.codexNotificationSettingsResult(payload)`, `window.codexExportResult(payload)`, and `window.updateCodexContextHealth(payload)`. The legacy `window.codexUsageBridge.getUsage()` hook remains supported. A web host can provide a matching `GET /api/usage`, or push data directly:
 
 ```js
 window.updateCodexUsage(payload);
@@ -180,7 +180,7 @@ window.recordCodexTurn({ inputTokens: 1200, outputTokens: 480 });
 
 Hosts can optionally include `today.tokenSource`, `today.conversations`, and `history.dailyTokens` in the usage payload to populate the detail dialogs. Conversation entries may include `contextWindowId` and `threadName`; the widget falls back to `threadId` and then `turnId` when grouping older payloads, and to the first prompt when a task name is unavailable. Older payloads remain supported and show an empty detail state when these fields are absent.
 
-Extended hosts can also provide `insights.projects`, `insights.tasks`, `contextHealth.sessions`, `forecast.primary`, `forecast.secondary`, and capability flags. Context rows include task/project identifiers, `usedTokens`, `maxTokens`, `usedPercent`, `remainingPercent`, `status`, `lastActive`, and `compactions`; the context dial appears beside the five-hour allowance only with `capabilities.contextHealth`. Project and task entries may use `projectKind` with `project` or `non_project`; on macOS, sessions without a resolvable Git root are grouped under “非项目中对话” (non-project conversations). A `partial` refresh payload is used as a cold-start placeholder and does not replace stable history, task, or context-health data after a complete snapshot has arrived. Without `capabilities.extendedInsights`, the shared widget retains its legacy seven-day chart so older Windows and embedded hosts do not expose unavailable controls.
+Extended hosts can also provide `insights.projects`, `insights.tasks`, `contextHealth.sessions`, `forecast.primary`, `forecast.secondary`, and capability flags. Context rows include task/project identifiers, `usedTokens`, `maxTokens`, `usedPercent`, `remainingPercent`, `status`, `lastActive`, and `compactions`; the context dial appears beside the five-hour allowance only with `capabilities.contextHealth`. Project and task entries may use `projectKind` with `project` or `non_project`; desktop hosts group sessions without a resolvable Git root under “非项目中对话” (non-project conversations). A `partial` refresh payload is used as a cold-start placeholder and does not replace stable history, task, forecast, report, or context-health data after a complete snapshot has arrived. Without `capabilities.extendedInsights`, the shared widget retains its legacy seven-day chart so older embedded hosts do not expose unavailable controls.
 
 ## Privacy
 
