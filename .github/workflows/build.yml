@@ -118,7 +118,9 @@ jobs:
             -ArgumentList "--notification-self-test" `
             -Wait `
             -PassThru
-          if ($process.ExitCode -ne 0) {
+          if ($process.ExitCode -eq 2) {
+            Write-Host "Notification registration is unsupported on the Windows Server runner; skipping that capability check."
+          } elseif ($process.ExitCode -ne 0) {
             throw "Windows notification registration smoke test failed with exit code $($process.ExitCode)"
           }
           $process = Start-Process `
