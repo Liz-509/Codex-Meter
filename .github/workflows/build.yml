@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 env:
-  RELEASE_VERSION: "1.4.1"
+  RELEASE_VERSION: "1.4.2"
 
 jobs:
   widget:
@@ -175,4 +175,4 @@ jobs:
             "release-artifacts/Codex-Meter-macOS-arm64-v${RELEASE_VERSION}.dmg" \
             "release-artifacts/Codex-Meter-Windows-x64-v${RELEASE_VERSION}.exe" \
             --title "Codex Meter ${GITHUB_REF_NAME}" \
-            --notes "Windows 已对齐 90 天洞察、项目/任务聚合、上下文健康度、用量预测、系统通知、动态托盘和 Markdown/CSV 报告导出；轻量安装器会在首次安装时按需下载系统运行时，并扩展跨平台自动化测试。"
+            --notes "新增 7/30/90 天用量洞察、项目/任务聚合、上下文健康度、用量预测、系统通知、动态托盘与菜单栏，以及 Markdown/CSV 周报导出；完善 Windows 安装与卸载体验，并更新中英文界面文档。"

@@ -6,6 +6,15 @@ Codex Meter 是一款适用于 macOS 和 Windows 的轻量级 Codex 原生用量
 
 ![Codex Meter 浅色模式](assets/screenshots/codex-meter-light.jpg)
 
+## 下载与安装
+
+- [macOS Apple Silicon 安装包 — Codex Meter v1.4.2](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.2/Codex-Meter-macOS-arm64-v1.4.2.dmg)
+- [Windows 10/11 x64 安装包 — Codex Meter v1.4.2](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.2/Codex-Meter-Windows-x64-v1.4.2.exe)
+
+macOS 用户打开下载的 DMG，将 `Codex Meter` 拖到“应用程序”快捷方式，再从“应用程序”中启动。Windows 用户打开下载的安装 EXE 并按提示操作；可以选择安装位置以及是否创建桌面快捷方式。轻量安装程序只会在系统缺失依赖时下载 .NET 8 Desktop Runtime 和共享 Windows App Runtime，因此首次安装可能需要联网；随后会添加开始菜单入口，并注册到 Windows“已安装的应用”。卸载 Codex Meter 时不会移除共享运行时；卸载程序可选择保留或移除应用偏好设置，不会影响 Codex 会话。Intel Mac 用户可以从源码构建安装包。
+
+由于 macOS 应用尚未公证，首次启动时系统可能要求确认。按住 Control 点击应用，选择**打开**，然后再次确认**打开**。
+
 ## 功能亮点
 
 - 查看 Codex 5 小时额度和每周额度，包括剩余百分比与下次重置时间。
@@ -21,6 +30,18 @@ Codex Meter 是一款适用于 macOS 和 Windows 的轻量级 Codex 原生用量
 - 跟随系统外观，或手动选择浅色、深色模式。
 - 在 macOS 和 Windows 上保持悬浮于其他窗口之上。
 - 所有处理均在本机完成，无分析统计、独立后端、凭据存储或 Codex 生命周期钩子。开机自启动为可选功能，只有在设置中主动开启后才会注册登录项。
+
+## 界面导览
+
+| 用量趋势 | 项目与任务 |
+| --- | --- |
+| ![最近 7 天 Token 趋势与额度预测](assets/screenshots/usage-trend.jpg) | ![本机项目及其 Codex 任务](assets/screenshots/projects-tasks.jpg) |
+| **周报与导出** | **今日对话** |
+| ![最近 7 天周报及 Markdown、CSV 导出](assets/screenshots/weekly-report.jpg) | ![按 Codex 任务聚合的今日本地对话](assets/screenshots/today-conversations.jpg) |
+| **上下文健康度** | **设置与通知** |
+| ![近期上下文窗口健康度与压缩详情](assets/screenshots/context-health.jpg) | ![开机自启动、额度通知和菜单栏设置](assets/screenshots/settings-notifications.jpg) |
+
+以上界面图使用虚构示例数据；你安装后的账户与任务数据仍只保留在本机。
 
 ## 如何使用 Codex Meter
 
@@ -83,15 +104,6 @@ Codex Meter 会先读取本地会话统计，因此在账户额度仍在同步�
 | Web 运行时 | 使用系统 WKWebView | 使用 Microsoft Edge WebView2；缺少运行时时会提供官方下载入口 |
 
 Windows 没有与 macOS“所有 Spaces”对应的稳定公开能力，独占全屏游戏也可能遮挡组件。
-
-## 下载与安装
-
-- [macOS Apple Silicon 安装包 — Codex Meter v1.4.1](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.1/Codex-Meter-macOS-arm64-v1.4.1.dmg)
-- [Windows 10/11 x64 安装包 — Codex Meter v1.4.1](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.1/Codex-Meter-Windows-x64-v1.4.1.exe)
-
-macOS 用户打开下载的 DMG，将 `Codex Meter` 拖到“应用程序”快捷方式，再从“应用程序”中启动。Windows 用户打开下载的安装 EXE 并按提示操作；可以选择安装位置以及是否创建桌面快捷方式。轻量安装程序只会在系统缺失依赖时下载 .NET 8 Desktop Runtime 和共享 Windows App Runtime，因此首次安装可能需要联网；随后会添加开始菜单入口，并注册到 Windows“已安装的应用”。卸载 Codex Meter 时不会移除共享运行时；卸载程序可选择保留或移除应用偏好设置，不会影响 Codex 会话。Intel Mac 用户可以从源码构建安装包。
-
-由于 macOS 应用尚未公证，首次启动时系统可能要求确认。按住 Control 点击应用，选择**打开**，然后再次确认**打开**。
 
 ## 系统要求
 
@@ -160,7 +172,7 @@ DMG 安装包会生成到 `outputs/Codex-Meter-macOS-<架构>-v<版本>.dmg`，�
 .\scripts\build-windows.ps1
 ```
 
-依赖共享运行时的 x64 应用会生成到 `build\windows\win-x64`，轻量图形化安装程序会生成到 `outputs\Codex-Meter-Windows-x64-v1.4.1.exe`。安装程序只内嵌压缩后的应用文件，并设有 10 MB 构建体积上限；首次安装时仅在缺失的情况下下载 .NET 8 Desktop Runtime 和 Windows App Runtime 2.4。打开 EXE 即可为当前 Windows 账户安装 Codex Meter；安装程序会添加开始菜单入口，并在 Windows“已安装的应用”中注册升级和卸载信息。
+依赖共享运行时的 x64 应用会生成到 `build\windows\win-x64`，轻量图形化安装程序会生成到 `outputs\Codex-Meter-Windows-x64-v1.4.2.exe`。安装程序只内嵌压缩后的应用文件，并设有 10 MB 构建体积上限；首次安装时仅在缺失的情况下下载 .NET 8 Desktop Runtime 和 Windows App Runtime 2.4。打开 EXE 即可为当前 Windows 账户安装 Codex Meter；安装程序会添加开始菜单入口，并在 Windows“已安装的应用”中注册升级和卸载信息。
 
 ## 可嵌入的 Web 组件
 
