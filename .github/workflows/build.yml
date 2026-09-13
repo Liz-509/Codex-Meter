@@ -52,7 +52,13 @@ jobs:
       - name: Restore tests
         run: dotnet restore windows/CodexMeter.Windows.Tests/CodexMeter.Windows.Tests.csproj
       - name: Run tests
-        run: dotnet test windows/CodexMeter.Windows.Tests/CodexMeter.Windows.Tests.csproj --configuration Release --no-restore
+        run: >-
+          dotnet test windows/CodexMeter.Windows.Tests/CodexMeter.Windows.Tests.csproj
+          --configuration Release
+          --no-restore
+          --blame-hang
+          --blame-hang-timeout 2m
+          --logger "console;verbosity=detailed"
       - name: Build installer
         shell: pwsh
         run: ./scripts/build-windows.ps1 -Version $env:RELEASE_VERSION
