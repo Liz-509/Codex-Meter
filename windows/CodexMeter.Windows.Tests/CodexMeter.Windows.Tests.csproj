@@ -7,6 +7,7 @@
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
     <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>
     <WebView2EnableCsWinRTProjection>false</WebView2EnableCsWinRTProjection>
     <AppxGeneratePriEnabled>false</AppxGeneratePriEnabled>
   </PropertyGroup>
@@ -18,6 +19,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\CodexMeter.Windows\CodexMeter.Windows.csproj" />
+    <ProjectReference
+      Include="..\CodexMeter.Windows\CodexMeter.Windows.csproj"
+      AdditionalProperties="WindowsAppSdkBootstrapInitialize=false" />
   </ItemGroup>
 </Project>
