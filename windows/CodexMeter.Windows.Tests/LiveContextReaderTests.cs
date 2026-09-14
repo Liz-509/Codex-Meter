@@ -77,6 +77,57 @@ public sealed class LiveContextReaderTests
     }
 
     [TestMethod]
+    public void CreatePayload_PrefersAuthoritativeTurnUsageAndTracksLegacyTurnsIncrementally()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"codex-meter-live-turns-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var path = Path.Combine(directory, "current.jsonl");
+            File.WriteAllLines(path,
+            [
+                Event("2033-05-13T10:00:00Z", "task_started", "turn-a"),
+                TokenWithTotal("2033-05-13T10:00:01Z", 10_000, 200_000, 35_000_000),
+                Usage("2033-05-13T10:00:02Z", "turn-a", 95_000),
+                TokenWithTotal("2033-05-13T10:00:03Z", 11_000, 200_000, 70_000_000),
+                Event("2033-05-13T10:00:04Z", "task_complete", "turn-a"),
+                Event("2033-05-13T10:00:05Z", "task_started", "turn-b"),
+                TokenWithTotal("2033-05-13T10:00:06Z", 20_000, 200_000, 70_025_000)
+            ]);
+            var reader = new LiveContextReader();
+            var thread = new JsonObject { ["id"] = "thread-a", ["path"] = path };
+            var session = reader.CreatePayload(thread)["contextHealth"]!["session"]!.AsObject();
+            Assert.AreEqual(120_000L, session["conversationTokens"]!.GetValue<long>());
+            Assert.AreEqual("turn-b", session["currentTurnId"]!.GetValue<string>());
+            Assert.AreEqual(25_000L, session["currentTurnTokens"]!.GetValue<long>());
+            Assert.IsTrue(session["currentTurnActive"]!.GetValue<bool>());
+
+            var partial = Usage("2033-05-13T10:00:07Z", "turn-b", 40_000);
+            File.AppendAllText(path, partial[..^2]);
+            var unchanged = reader.CreatePayload(thread)["contextHealth"]!["session"]!.AsObject();
+            Assert.AreEqual(25_000L, unchanged["currentTurnTokens"]!.GetValue<long>());
+            File.AppendAllText(path, partial[^2..] + Environment.NewLine);
+            var completed = reader.CreatePayload(thread)["contextHealth"]!["session"]!.AsObject();
+            Assert.AreEqual(40_000L, completed["currentTurnTokens"]!.GetValue<long>());
+            Assert.AreEqual(135_000L, completed["conversationTokens"]!.GetValue<long>());
+
+            File.WriteAllLines(path,
+            [
+                Event("2033-05-13T11:00:00Z", "task_started", "turn-c"),
+                TokenWithTotal("2033-05-13T11:00:01Z", 5_000, 200_000, 10_000)
+            ]);
+            File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddSeconds(3));
+            var replaced = reader.CreatePayload(thread)["contextHealth"]!["session"]!.AsObject();
+            Assert.AreEqual("turn-c", replaced["currentTurnId"]!.GetValue<string>());
+            Assert.AreEqual(10_000L, replaced["conversationTokens"]!.GetValue<long>());
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [TestMethod]
     [DataRow(59d, "healthy")]
     [DataRow(60d, "attention")]
     [DataRow(80d, "high")]
@@ -89,5 +140,26 @@ public sealed class LiveContextReaderTests
         timestamp,
         type = "event_msg",
         payload = new { type = "token_count", info = new { model_context_window = maximum, last_token_usage = new { total_tokens = used } } }
+    });
+
+    private static string TokenWithTotal(string timestamp, long used, long maximum, long total) => JsonSerializer.Serialize(new
+    {
+        timestamp,
+        type = "event_msg",
+        payload = new { type = "token_count", info = new { model_context_window = maximum, last_token_usage = new { total_tokens = used }, total_token_usage = new { total_tokens = total } } }
+    });
+
+    private static string Event(string timestamp, string type, string turnId) => JsonSerializer.Serialize(new
+    {
+        timestamp,
+        type = "event_msg",
+        payload = new { type, turn_id = turnId }
+    });
+
+    private static string Usage(string timestamp, string turnId, long tokens) => JsonSerializer.Serialize(new
+    {
+        timestamp,
+        type = "token_usage_record",
+        payload = new { turn_id = turnId, turn_token_usage = new { total_tokens = tokens } }
     });
 }

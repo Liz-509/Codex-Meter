@@ -9,7 +9,7 @@ Codex Meter is a lightweight native usage widget for Codex on macOS and Windows.
 ## Download and install
 
 - [macOS Apple Silicon installer — Codex Meter v1.4.7](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.7/Codex-Meter-macOS-arm64-v1.4.7.dmg)
-- [Windows 10/11 x64 installer — Codex Meter v1.4.2](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.2/Codex-Meter-Windows-x64-v1.4.2.exe)
+- [Windows 10/11 x64 installer — Codex Meter v1.4.8](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.8/Codex-Meter-Windows-x64-v1.4.8.exe)
 
 On macOS, open the downloaded DMG and drag `Codex Meter` to the Applications shortcut, then launch it from Applications. On Windows, open the downloaded setup EXE and follow the installer; you can choose the installation location and whether to create a desktop shortcut. The lightweight setup downloads .NET 8 Desktop Runtime and the shared Windows App Runtime only when they are missing, so an internet connection may be required on first install. It then adds the app to the Start menu and registers it in **Installed apps**. Uninstalling Codex Meter does not remove shared runtimes and can preserve or remove the app's local preferences without touching Codex sessions. Intel Mac users can build an installer from source.
 
@@ -171,7 +171,7 @@ Install the .NET 8 SDK, clone the repository, and run the following command in P
 .\scripts\build-windows.ps1
 ```
 
-The framework-dependent x64 app is written to `build\windows\win-x64`, and the lightweight graphical installer is written to `outputs\Codex-Meter-Windows-x64-v1.4.2.exe`. The installer embeds only the compressed app payload and has a 10 MB build-time size budget. On first install it downloads .NET 8 Desktop Runtime and Windows App Runtime 2.4 only if they are missing. Open the EXE to install Codex Meter for the current Windows account. The installer adds the app to the Start menu and registers it with Windows **Installed apps** for upgrades and removal.
+The framework-dependent x64 app is written to `build\windows\win-x64`, and the lightweight graphical installer is written to `outputs\Codex-Meter-Windows-x64-v1.4.8.exe`. The installer embeds only the compressed app payload and has a 10 MB build-time size budget. On first install it downloads .NET 8 Desktop Runtime and Windows App Runtime 2.4 only if they are missing. Open the EXE to install Codex Meter for the current Windows account. The installer adds the app to the Start menu and registers it with Windows **Installed apps** for upgrades and removal.
 
 ## Embeddable web component
 

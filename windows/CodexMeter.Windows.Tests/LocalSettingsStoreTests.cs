@@ -20,6 +20,10 @@ public sealed class LocalSettingsStoreTests
             Assert.IsTrue(defaults.NotifyExhausted);
             Assert.IsTrue(defaults.NotifyRestored);
             Assert.IsTrue(defaults.TrayPercentageVisible);
+            Assert.IsFalse(defaults.RemoteSessionMonitoringEnabled);
+            Assert.AreEqual(2, defaults.LiveRefreshIntervalSeconds);
+            Assert.AreEqual(30, defaults.GeneralRefreshIntervalSeconds);
+            Assert.AreEqual(60, defaults.SshRefreshIntervalSeconds);
 
             store.Update(value =>
             {

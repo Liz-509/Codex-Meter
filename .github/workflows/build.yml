@@ -14,7 +14,7 @@ permissions:
 
 env:
   MACOS_RELEASE_VERSION: "1.4.7"
-  WINDOWS_RELEASE_VERSION: "1.4.2"
+  WINDOWS_RELEASE_VERSION: "1.4.8"
 
 jobs:
   widget:
@@ -164,17 +164,17 @@ jobs:
     name: Publish release
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
-      - macos
+      - windows
       - widget
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: Validate release version
-        run: test "${GITHUB_REF_NAME}" = "v${MACOS_RELEASE_VERSION}"
+        run: test "${GITHUB_REF_NAME}" = "v${WINDOWS_RELEASE_VERSION}"
       - uses: actions/download-artifact@v4
         with:
-          name: Codex-Meter-macOS-arm64-v${{ env.MACOS_RELEASE_VERSION }}
+          name: Codex-Meter-Windows-x64-v${{ env.WINDOWS_RELEASE_VERSION }}
           path: release-artifacts
       - name: Create GitHub release
         env:
@@ -182,6 +182,6 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
-            "release-artifacts/Codex-Meter-macOS-arm64-v${MACOS_RELEASE_VERSION}.dmg" \
+            "release-artifacts/Codex-Meter-Windows-x64-v${WINDOWS_RELEASE_VERSION}.exe" \
             --title "Codex Meter ${GITHUB_REF_NAME}" \
-            --notes "新增冷启动加载体验：首次完整数据返回前模糊当前界面，并在中央显示以 Codex Meter 四角星为核心的呼吸微旋动画；折叠和展开状态均保持正确居中。首次请求成功或失败后加载层会平滑退出，后续刷新不再遮挡已有数据。同步补充深浅色主题、减少动态效果、宿主暂停和无障碍状态支持。本版本仅发布 macOS 安装包。"
+            --notes "Windows 功能对齐更新：新增当前回答与当前对话 Token 统计、可配置的实时/常规/SSH 刷新频率、静态能力预注入，以及可选的 OpenSSH 远端会话聚合。同步改进实时上下文解析、缓存与恢复刷新行为，并补充自动化测试。本版本仅发布 Windows x64 安装包。"

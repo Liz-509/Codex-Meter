@@ -15,9 +15,16 @@ internal sealed record ConversationStats(
     string Preview,
     long? Tokens,
     string Date = "",
-    string ProjectPath = ProjectResolver.NonProjectKey);
+    string ProjectPath = ProjectResolver.NonProjectKey,
+    string? ThreadName = null,
+    string? SourceHost = null);
 
-internal sealed record ProjectDailyStats(string Date, string ProjectPath, long Tokens);
+internal sealed record ProjectDailyStats(
+    string Date,
+    string ProjectPath,
+    long Tokens,
+    string? ProjectName = null,
+    string? SourceHost = null);
 
 internal sealed record ContextHealthStats(
     string? ThreadId,
@@ -27,7 +34,14 @@ internal sealed record ContextHealthStats(
     long UsedTokens,
     long MaxTokens,
     DateTimeOffset UpdatedAt,
-    int Compactions);
+    int Compactions,
+    long? ConversationTokens = null,
+    string? CurrentTurnId = null,
+    long? CurrentTurnTokens = null,
+    bool? CurrentTurnActive = null,
+    string? ThreadName = null,
+    string? SourceHost = null,
+    string? ProjectName = null);
 
 internal sealed record SessionStats(
     int Questions,
@@ -105,7 +119,7 @@ internal static class ProjectResolver
         return result;
     }
 
-    public static string Kind(string path) => path == NonProjectKey ? "non_project" : "project";
+    public static string Kind(string path) => path == NonProjectKey || path.StartsWith("__remote_non_project__:", StringComparison.Ordinal) ? "non_project" : "project";
 }
 
 internal sealed class SessionStatsCache
@@ -237,6 +251,10 @@ internal static partial class SessionStatsReader
         long previousTotal = 0;
         var usageRecordSinceTokenCount = false;
         var compactions = 0;
+        var currentTurnActive = false;
+        var turnTokenTotals = new Dictionary<string, long>(StringComparer.Ordinal);
+        var authoritativeTurnIds = new HashSet<string>(StringComparer.Ordinal);
+        var legacyTurnBaselines = new Dictionary<string, long>(StringComparer.Ordinal);
         ContextHealthStats? context = null;
         using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         using var reader = new StreamReader(stream);
@@ -270,9 +288,18 @@ internal static partial class SessionStatsReader
                     if (eventType == "task_started")
                     {
                         currentTurnId = ReadString(payload, "turn_id") ?? Guid.NewGuid().ToString("N");
+                        currentTurnActive = true;
+                        turnTokenTotals.TryAdd(currentTurnId, 0);
+                        legacyTurnBaselines[currentTurnId] = previousTotal;
                         if (!TryReadTimestamp(root, out var startedAt)) continue;
                         var date = LocalDateKey(startedAt, timeZone);
                         if (includeConversations && dailyTokens.ContainsKey(date)) conversations[currentTurnId] = new ConversationBuilder(currentTurnId, threadId, contextWindowId, startedAt, date, projectPath);
+                        continue;
+                    }
+                    if (eventType == "task_complete")
+                    {
+                        var completedTurnId = ReadString(payload, "turn_id") ?? currentTurnId;
+                        if (completedTurnId == currentTurnId) currentTurnActive = false;
                         continue;
                     }
                     if (eventType == "user_message" && currentTurnId is not null && conversations.TryGetValue(currentTurnId, out var legacy))
@@ -288,6 +315,12 @@ internal static partial class SessionStatsReader
                         context = new ContextHealthStats(threadId, contextWindowId, projectPath, preview, used, maximum, updatedAt, compactions);
                     }
                     if (!TryReadLegacyTotal(payload, out var total)) continue;
+                    if (currentTurnId is not null && !authoritativeTurnIds.Contains(currentTurnId))
+                    {
+                        var baseline = legacyTurnBaselines.GetValueOrDefault(currentTurnId, previousTotal);
+                        var turnTotal = total >= baseline ? total - baseline : total;
+                        turnTokenTotals[currentTurnId] = Math.Max(turnTokenTotals.GetValueOrDefault(currentTurnId), Math.Max(0, turnTotal));
+                    }
                     var delta = total >= previousTotal ? total - previousTotal : total;
                     previousTotal = total;
                     if (usageRecordSinceTokenCount) { usageRecordSinceTokenCount = false; continue; }
@@ -300,14 +333,30 @@ internal static partial class SessionStatsReader
                     var counted = false;
                     if (payload.TryGetProperty("usage", out var usage) && TryReadInt64(usage, "total_tokens", out var responseTokens) && TryReadTimestamp(root, out var usageAt))
                     { AddTokens(dailyTokens, projectTokens, conversations, null, projectPath, LocalDateKey(usageAt, timeZone), responseTokens); counted = true; }
-                    if (turnId is not null && conversations.TryGetValue(turnId, out var conversation) && payload.TryGetProperty("turn_token_usage", out var turnUsage) && TryReadInt64(turnUsage, "total_tokens", out var turnTokens)) conversation.Tokens = Math.Max(0, turnTokens);
+                    if (turnId is not null && payload.TryGetProperty("turn_token_usage", out var turnUsage) && TryReadInt64(turnUsage, "total_tokens", out var turnTokens))
+                    {
+                        turnTokens = Math.Max(0, turnTokens);
+                        turnTokenTotals[turnId] = turnTokens;
+                        authoritativeTurnIds.Add(turnId);
+                        if (conversations.TryGetValue(turnId, out var conversation)) conversation.Tokens = turnTokens;
+                    }
                     usageRecordSinceTokenCount = counted;
                     continue;
                 }
                 if (rootType == "response_item") ReadUserPreview(payload, currentTurnId, conversations, context, value => context = value);
             }
         }
-        if (context is not null) setContext(context);
+        if (context is not null)
+        {
+            context = context with
+            {
+                ConversationTokens = turnTokenTotals.Values.Sum(),
+                CurrentTurnId = currentTurnId,
+                CurrentTurnTokens = currentTurnId is not null ? turnTokenTotals.GetValueOrDefault(currentTurnId) : null,
+                CurrentTurnActive = currentTurnActive
+            };
+            setContext(context);
+        }
     }
 
     private static void AddTokens(IDictionary<string, long> days, IDictionary<string, long> projects, IDictionary<string, ConversationBuilder> conversations, string? turnId, string project, string date, long tokens)

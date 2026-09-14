@@ -9,7 +9,7 @@ Codex Meter 是一款适用于 macOS 和 Windows 的轻量级 Codex 原生用量
 ## 下载与安装
 
 - [macOS Apple Silicon 安装包 — Codex Meter v1.4.7](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.7/Codex-Meter-macOS-arm64-v1.4.7.dmg)
-- [Windows 10/11 x64 安装包 — Codex Meter v1.4.2](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.2/Codex-Meter-Windows-x64-v1.4.2.exe)
+- [Windows 10/11 x64 安装包 — Codex Meter v1.4.8](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.8/Codex-Meter-Windows-x64-v1.4.8.exe)
 
 macOS 用户打开下载的 DMG，将 `Codex Meter` 拖到“应用程序”快捷方式，再从“应用程序”中启动。Windows 用户打开下载的安装 EXE 并按提示操作；可以选择安装位置以及是否创建桌面快捷方式。轻量安装程序只会在系统缺失依赖时下载 .NET 8 Desktop Runtime 和共享 Windows App Runtime，因此首次安装可能需要联网；随后会添加开始菜单入口，并注册到 Windows“已安装的应用”。卸载 Codex Meter 时不会移除共享运行时；卸载程序可选择保留或移除应用偏好设置，不会影响 Codex 会话。Intel Mac 用户可以从源码构建安装包。
 
@@ -172,7 +172,7 @@ DMG 安装包会生成到 `outputs/Codex-Meter-macOS-<架构>-v<版本>.dmg`，�
 .\scripts\build-windows.ps1
 ```
 
-依赖共享运行时的 x64 应用会生成到 `build\windows\win-x64`，轻量图形化安装程序会生成到 `outputs\Codex-Meter-Windows-x64-v1.4.2.exe`。安装程序只内嵌压缩后的应用文件，并设有 10 MB 构建体积上限；首次安装时仅在缺失的情况下下载 .NET 8 Desktop Runtime 和 Windows App Runtime 2.4。打开 EXE 即可为当前 Windows 账户安装 Codex Meter；安装程序会添加开始菜单入口，并在 Windows“已安装的应用”中注册升级和卸载信息。
+依赖共享运行时的 x64 应用会生成到 `build\windows\win-x64`，轻量图形化安装程序会生成到 `outputs\Codex-Meter-Windows-x64-v1.4.8.exe`。安装程序只内嵌压缩后的应用文件，并设有 10 MB 构建体积上限；首次安装时仅在缺失的情况下下载 .NET 8 Desktop Runtime 和 Windows App Runtime 2.4。打开 EXE 即可为当前 Windows 账户安装 Codex Meter；安装程序会添加开始菜单入口，并在 Windows“已安装的应用”中注册升级和卸载信息。
 
 ## 可嵌入的 Web 组件
 

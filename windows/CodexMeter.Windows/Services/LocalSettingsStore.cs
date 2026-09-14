@@ -11,6 +11,11 @@ internal sealed class AppSettings
     public bool NotifyRestored { get; set; } = true;
     public bool NotificationPromptSeen { get; set; }
     public bool TrayPercentageVisible { get; set; } = true;
+    public int LiveRefreshIntervalSeconds { get; set; } = 2;
+    public int GeneralRefreshIntervalSeconds { get; set; } = 30;
+    public int SshRefreshIntervalSeconds { get; set; } = 60;
+    public bool RemoteSessionMonitoringEnabled { get; set; }
+    public bool RemoteSessionPromptSeen { get; set; }
     public HashSet<string> DeliveredEvents { get; set; } = [];
     public Dictionary<string, double> PreviousRemaining { get; set; } = new(StringComparer.Ordinal);
     public Dictionary<string, double?> PreviousResetsAt { get; set; } = new(StringComparer.Ordinal);

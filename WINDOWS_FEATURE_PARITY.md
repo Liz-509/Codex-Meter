@@ -4,7 +4,9 @@ Windows 已完成与 macOS 的 P0/P1 功能对齐：90 天用量洞察、项目/
 
 状态（2026-09-13）：功能实现、自动化测试、Release 发布和安装器自检已完成；Windows 10 22H2 / Windows 11 的通知、DPI、休眠恢复及窗口置顶仍属于发布前人工验收项。
 
-## 后续待开发（更新于 2026-09-14）
+## 2026-09-14 对齐项（代码已完成，等待 Windows 人工验收）
+
+状态（2026-09-14）：Windows 已接入当前对话 Token、刷新频率、静态能力预注入和 OpenSSH 远端会话聚合；以下条目继续作为 Windows 10/11 人工回归清单，勾选状态在实际设备验收后更新。
 
 - [ ] 接入“本轮回答 / 当前对话 Tokens”：优先从 `token_usage_record.turn_token_usage.total_tokens` 读取本轮累计；一旦某轮出现该权威记录，后续整段累计不得覆盖它。仅有旧格式时，以 `task_started` 时的 `token_count.info.total_token_usage.total_tokens` 为基线计算本轮增量；按任务内各 `turnId` 的最新值求和得到本对话累计。在约 2 秒实时回调和完整快照中输出 `conversationTokens`、`currentTurnId`、`currentTurnTokens`、`currentTurnActive`，并启用 `capabilities.currentConversationTokens`。启用后首页使用“5 小时 / 每周”双圆环及下方全宽本轮卡片；启用前 Windows 继续显示原上下文健康度圆盘与每周进度条。
 - [ ] 接入三组刷新频率设置：通过 `getRefreshSettings`、`setRefreshSettings` 与 `window.codexRefreshSettingsResult` 提供实时回答 `1/2/5/10` 秒、常规数据 `15/30/60/120` 秒、SSH `30/60/120/300` 秒白名单档位，并启用 `capabilities.refreshSettings`。设置页使用每次打开默认收起的列表项，收起时概括当前三个档位；账户结果与 SSH 快照应独立缓存、到期请求应合并。SSH 关闭时禁用其档位，30 秒档显示网络、耗电与远端负载提醒。Windows 接入前不声明能力，共享设置页不显示该区域。

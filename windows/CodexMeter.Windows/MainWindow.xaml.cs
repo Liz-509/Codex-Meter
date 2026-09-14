@@ -40,6 +40,7 @@ public partial class MainWindow : Window
         Environment.ProcessPath ?? throw new InvalidOperationException("无法确定应用程序路径。"));
     private readonly DispatcherTimer _refreshTimer;
     private readonly DispatcherTimer _contextHealthTimer;
+    private readonly DispatcherTimer _remoteRefreshTimer;
     private readonly CancellationTokenSource _lifetime = new();
     private Forms.NotifyIcon? _trayIcon;
     private Drawing.Icon? _trayIconImage;
@@ -53,10 +54,14 @@ public partial class MainWindow : Window
     private bool _isResetting;
     private bool _isRefreshingContext;
     private bool _refreshAfterReset;
+    private bool _pendingGeneralRefresh;
+    private bool _pendingRemoteRefresh;
+    private bool _refreshDispatchScheduled;
     private bool _isExiting;
     private bool _webReady;
     private bool _hasReceivedUsage;
     private int _retryAttempt;
+    private int _connectedRemoteHostCount;
     private System.Windows.Point? _compactOrigin;
     private HwndSource? _windowSource;
     private bool _isNativeDragging;
@@ -87,10 +92,13 @@ public partial class MainWindow : Window
         SystemEvents.SessionSwitch += OnSessionSwitch;
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
 
-        _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
-        _refreshTimer.Tick += async (_, _) => await RefreshUsageAsync();
-        _contextHealthTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+        var refreshPreferences = _settings.Read(RefreshPreferences.From);
+        _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(refreshPreferences.GeneralSeconds) };
+        _refreshTimer.Tick += (_, _) => RequestUsageRefresh(general: true, remote: false);
+        _contextHealthTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(refreshPreferences.LiveSeconds) };
         _contextHealthTimer.Tick += async (_, _) => await RefreshCurrentContextHealthAsync();
+        _remoteRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(refreshPreferences.SshSeconds) };
+        _remoteRefreshTimer.Tick += (_, _) => RequestUsageRefresh(general: false, remote: true);
     }
 
     public void ShowPanel()
@@ -146,6 +154,12 @@ public partial class MainWindow : Window
         await Browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(
             """
             window.codexMeterHostActive = true;
+            window.codexMeterInitialCapabilities = {
+              contextHealth: true,
+              currentConversationTokens: true,
+              refreshSettings: true,
+              remoteSessionMonitoring: true
+            };
             window.codexMeterBridge = {
               getUsage() {
                 window.chrome.webview.postMessage({ action: 'getUsage' });
@@ -184,6 +198,21 @@ public partial class MainWindow : Window
               dismissNotificationPrompt() {
                 window.chrome.webview.postMessage({ action: 'dismissNotificationPrompt' });
               },
+              getRemoteSessionSettings() {
+                window.chrome.webview.postMessage({ action: 'getRemoteSessionSettings' });
+              },
+              setRemoteSessionMonitoring(payload) {
+                window.chrome.webview.postMessage({ action: 'setRemoteSessionMonitoring', enabled: payload?.enabled === true });
+              },
+              dismissRemoteSessionPrompt() {
+                window.chrome.webview.postMessage({ action: 'dismissRemoteSessionPrompt' });
+              },
+              getRefreshSettings() {
+                window.chrome.webview.postMessage({ action: 'getRefreshSettings' });
+              },
+              setRefreshSettings(payload) {
+                window.chrome.webview.postMessage({ action: 'setRefreshSettings', liveSeconds: payload?.liveSeconds, generalSeconds: payload?.generalSeconds, sshSeconds: payload?.sshSeconds });
+              },
               openNotificationSettings() {
                 window.chrome.webview.postMessage({ action: 'openNotificationSettings' });
               },
@@ -210,7 +239,7 @@ public partial class MainWindow : Window
         {
             _webReady = true;
             await PublishHostActiveAsync();
-            await RefreshUsageAsync();
+            RequestUsageRefresh(general: true, remote: true);
         };
         Browser.CoreWebView2.Navigate("https://app.codex-meter.local/companion.html");
     }
@@ -226,7 +255,7 @@ public partial class MainWindow : Window
             switch (actionElement.GetString())
             {
                 case "getUsage":
-                    await RefreshUsageAsync();
+                    RequestUsageRefresh(general: true, remote: true);
                     break;
                 case "consumeReset":
                     if (root.TryGetProperty("confirmed", out var confirmed) &&
@@ -265,6 +294,22 @@ public partial class MainWindow : Window
                     _notifications.DismissPrompt();
                     await DeliverNotificationSettingsAsync(_notifications.GetSettingsPayload());
                     break;
+                case "getRemoteSessionSettings":
+                    await DeliverRemoteSessionSettingsAsync();
+                    break;
+                case "setRemoteSessionMonitoring":
+                    await SetRemoteSessionMonitoringAsync(root.TryGetProperty("enabled", out var remoteEnabled) && remoteEnabled.ValueKind is JsonValueKind.True);
+                    break;
+                case "dismissRemoteSessionPrompt":
+                    _settings.Update(value => value.RemoteSessionPromptSeen = true);
+                    await DeliverRemoteSessionSettingsAsync();
+                    break;
+                case "getRefreshSettings":
+                    await DeliverRefreshSettingsAsync();
+                    break;
+                case "setRefreshSettings":
+                    await SetRefreshSettingsAsync(JsonNode.Parse(root.GetRawText())!.AsObject());
+                    break;
                 case "openNotificationSettings":
                     OpenNotificationSettings();
                     break;
@@ -288,22 +333,51 @@ public partial class MainWindow : Window
         }
     }
 
-    private async Task RefreshUsageAsync()
+    private void RequestUsageRefresh(bool general, bool remote)
     {
-        if (_isRefreshing || !_webReady) return;
+        _pendingGeneralRefresh |= general;
+        _pendingRemoteRefresh |= remote && _settings.Read(value => value.RemoteSessionMonitoringEnabled);
+        if (_isRefreshing || _refreshDispatchScheduled || !_webReady) return;
+        _refreshDispatchScheduled = true;
+        _ = Dispatcher.BeginInvoke(DispatcherPriority.ContextIdle, new Action(async () =>
+        {
+            _refreshDispatchScheduled = false;
+            var refreshGeneral = _pendingGeneralRefresh;
+            var refreshRemote = _pendingRemoteRefresh;
+            _pendingGeneralRefresh = false;
+            _pendingRemoteRefresh = false;
+            await RefreshUsageAsync(refreshGeneral, refreshRemote);
+        }));
+    }
+
+    private async Task RefreshUsageAsync(bool refreshAccount = true, bool refreshRemote = true)
+    {
+        if (!_webReady) return;
+        var remoteEnabled = _settings.Read(value => value.RemoteSessionMonitoringEnabled);
+        refreshRemote &= remoteEnabled;
+        if (_isRefreshing)
+        {
+            _pendingGeneralRefresh |= refreshAccount;
+            _pendingRemoteRefresh |= refreshRemote;
+            return;
+        }
         _isRefreshing = true;
 
         try
         {
+            _connectedRemoteHostCount = await Task.Run(_usageService.ConnectedRemoteHostCount, _lifetime.Token);
             var payload = await _usageService.FetchAsync(
-                async partial =>
+                includeRemoteSessions: remoteEnabled,
+                refreshAccount: refreshAccount,
+                refreshRemoteSessions: refreshRemote,
+                partialCallback: async partial =>
                 {
                     partial["capabilities"] = Capabilities(notificationPromptNeeded: false);
                     await DeliverOnDispatcherAsync(partial);
                 },
-                _lifetime.Token);
+                cancellationToken: _lifetime.Token);
             var succeeded = payload["error"] is null;
-            if (succeeded)
+            if (succeeded && refreshAccount)
             {
                 var analytics = _quotaMonitor.Process(payload);
                 payload["forecast"] = analytics.Forecast;
@@ -313,24 +387,30 @@ public partial class MainWindow : Window
                 _notifications.Deliver(analytics.Events);
                 UpdateTrayStatus();
             }
+            else if (succeeded)
+            {
+                payload["forecast"] = _latestForecast.DeepClone();
+                _latestCompletePayload = (JsonObject)payload.DeepClone();
+            }
             payload["capabilities"] = Capabilities(succeeded && !_settings.Read(value => value.NotificationPromptSeen));
             await DeliverAsync(payload);
 
-            if (succeeded)
+            if (succeeded && refreshAccount)
             {
                 _hasReceivedUsage = true;
                 _retryAttempt = 0;
                 if (!_refreshTimer.IsEnabled) _refreshTimer.Start();
             }
-            else if (!_hasReceivedUsage)
+            else if (refreshAccount && !_hasReceivedUsage)
             {
                 ScheduleStartupRetry();
             }
-            else
+            else if (refreshAccount)
             {
                 ScheduleRetry();
             }
             if (!_contextHealthTimer.IsEnabled) _contextHealthTimer.Start();
+            if (remoteEnabled && !_remoteRefreshTimer.IsEnabled) _remoteRefreshTimer.Start();
             await RefreshCurrentContextHealthAsync();
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
@@ -344,7 +424,15 @@ public partial class MainWindow : Window
         if (_refreshAfterReset)
         {
             _refreshAfterReset = false;
-            await RefreshUsageAsync();
+            _pendingGeneralRefresh = true;
+        }
+        if (_pendingGeneralRefresh || _pendingRemoteRefresh)
+        {
+            var nextGeneral = _pendingGeneralRefresh;
+            var nextRemote = _pendingRemoteRefresh;
+            _pendingGeneralRefresh = false;
+            _pendingRemoteRefresh = false;
+            await RefreshUsageAsync(nextGeneral, nextRemote);
         }
     }
 
@@ -364,7 +452,7 @@ public partial class MainWindow : Window
             }
             else
             {
-                await RefreshUsageAsync();
+                await RefreshUsageAsync(refreshAccount: true, refreshRemote: false);
             }
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
@@ -390,15 +478,27 @@ public partial class MainWindow : Window
         await Browser.CoreWebView2.ExecuteScriptAsync($"window.codexResetResult?.({json});");
     }
 
-    private static JsonObject Capabilities(bool notificationPromptNeeded) => new()
+    private JsonObject Capabilities(bool notificationPromptNeeded)
     {
-        ["extendedInsights"] = true,
-        ["contextHealth"] = true,
-        ["notifications"] = true,
-        ["menuBar"] = true,
-        ["reportExport"] = true,
-        ["notificationPromptNeeded"] = notificationPromptNeeded
-    };
+        var remoteEnabled = _settings.Read(value => value.RemoteSessionMonitoringEnabled);
+        var remotePromptSeen = _settings.Read(value => value.RemoteSessionPromptSeen);
+        var connectedHosts = _connectedRemoteHostCount;
+        return new JsonObject
+        {
+            ["extendedInsights"] = true,
+            ["contextHealth"] = true,
+            ["currentConversationTokens"] = true,
+            ["refreshSettings"] = true,
+            ["notifications"] = true,
+            ["menuBar"] = true,
+            ["reportExport"] = true,
+            ["notificationPromptNeeded"] = notificationPromptNeeded,
+            ["remoteSessionMonitoring"] = true,
+            ["remoteSessionMonitoringEnabled"] = remoteEnabled,
+            ["remoteSessionHostCount"] = connectedHosts,
+            ["remoteSessionPromptNeeded"] = connectedHosts > 0 && !remoteEnabled && !remotePromptSeen
+        };
+    }
 
     private async Task RefreshCurrentContextHealthAsync()
     {
@@ -406,7 +506,9 @@ public partial class MainWindow : Window
         _isRefreshingContext = true;
         try
         {
-            var payload = await _usageService.FetchCurrentContextHealthAsync(_lifetime.Token);
+            var payload = await _usageService.FetchCurrentContextHealthAsync(
+                _lifetime.Token,
+                _settings.Read(RefreshPreferences.From).LiveSeconds);
             if (payload is null || Browser.CoreWebView2 is null) return;
             var json = payload.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
             await Browser.CoreWebView2.ExecuteScriptAsync($"window.updateCodexContextHealth?.({json});");
@@ -419,6 +521,96 @@ public partial class MainWindow : Window
     {
         if (!_webReady || Browser.CoreWebView2 is null) return;
         await Browser.CoreWebView2.ExecuteScriptAsync($"window.codexNotificationSettingsResult?.({payload.ToJsonString()});");
+    }
+
+    private JsonObject RemoteSessionSettingsPayload()
+    {
+        var enabled = _settings.Read(value => value.RemoteSessionMonitoringEnabled);
+        var promptSeen = _settings.Read(value => value.RemoteSessionPromptSeen);
+        var connectedHosts = _connectedRemoteHostCount;
+        return new JsonObject
+        {
+            ["supported"] = true,
+            ["enabled"] = enabled,
+            ["connectedHosts"] = connectedHosts,
+            ["promptNeeded"] = connectedHosts > 0 && !enabled && !promptSeen
+        };
+    }
+
+    private async Task DeliverRemoteSessionSettingsAsync()
+    {
+        if (!_webReady || Browser.CoreWebView2 is null) return;
+        _connectedRemoteHostCount = await Task.Run(_usageService.ConnectedRemoteHostCount, _lifetime.Token);
+        await Browser.CoreWebView2.ExecuteScriptAsync($"window.codexRemoteSessionSettingsResult?.({RemoteSessionSettingsPayload().ToJsonString()});");
+    }
+
+    private async Task SetRemoteSessionMonitoringAsync(bool enabled)
+    {
+        _settings.Update(value =>
+        {
+            value.RemoteSessionMonitoringEnabled = enabled;
+            value.RemoteSessionPromptSeen = true;
+        });
+        if (enabled)
+        {
+            RestartRemoteRefreshTimer();
+        }
+        else
+        {
+            _remoteRefreshTimer.Stop();
+            _pendingRemoteRefresh = false;
+            _usageService.ClearRemoteSessionCache();
+        }
+        await DeliverRemoteSessionSettingsAsync();
+        await DeliverRefreshSettingsAsync();
+        await RefreshUsageAsync(refreshAccount: !enabled, refreshRemote: enabled);
+    }
+
+    private async Task DeliverRefreshSettingsAsync()
+    {
+        if (!_webReady || Browser.CoreWebView2 is null) return;
+        var payload = _settings.Read(value => RefreshPreferences.From(value).Payload(value.RemoteSessionMonitoringEnabled));
+        await Browser.CoreWebView2.ExecuteScriptAsync($"window.codexRefreshSettingsResult?.({payload.ToJsonString()});");
+    }
+
+    private async Task SetRefreshSettingsAsync(JsonObject values)
+    {
+        var previous = _settings.Read(RefreshPreferences.From);
+        var updated = previous.Update(values);
+        _settings.Update(updated.Persist);
+        if (updated.LiveSeconds != previous.LiveSeconds)
+        {
+            _contextHealthTimer.Interval = TimeSpan.FromSeconds(updated.LiveSeconds);
+            if (_contextHealthTimer.IsEnabled) { _contextHealthTimer.Stop(); _contextHealthTimer.Start(); }
+            await RefreshCurrentContextHealthAsync();
+        }
+        if (updated.GeneralSeconds != previous.GeneralSeconds)
+        {
+            _refreshTimer.Interval = TimeSpan.FromSeconds(updated.GeneralSeconds);
+            if (_refreshTimer.IsEnabled) { _refreshTimer.Stop(); _refreshTimer.Start(); }
+            _pendingGeneralRefresh = true;
+        }
+        if (updated.SshSeconds != previous.SshSeconds)
+        {
+            RestartRemoteRefreshTimer();
+            if (_settings.Read(value => value.RemoteSessionMonitoringEnabled)) _pendingRemoteRefresh = true;
+        }
+        await DeliverRefreshSettingsAsync();
+        if (_pendingGeneralRefresh || _pendingRemoteRefresh)
+        {
+            var refreshGeneral = _pendingGeneralRefresh;
+            var refreshRemote = _pendingRemoteRefresh;
+            _pendingGeneralRefresh = false;
+            _pendingRemoteRefresh = false;
+            await RefreshUsageAsync(refreshGeneral, refreshRemote);
+        }
+    }
+
+    private void RestartRemoteRefreshTimer()
+    {
+        _remoteRefreshTimer.Stop();
+        _remoteRefreshTimer.Interval = TimeSpan.FromSeconds(_settings.Read(RefreshPreferences.From).SshSeconds);
+        if (_settings.Read(value => value.RemoteSessionMonitoringEnabled)) _remoteRefreshTimer.Start();
     }
 
     private async Task DeliverExportResultAsync(JsonObject payload)
@@ -521,7 +713,7 @@ public partial class MainWindow : Window
         try
         {
             await Task.Delay(delay, _lifetime.Token);
-            await RefreshUsageAsync();
+            RequestUsageRefresh(general: true, remote: false);
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
@@ -778,7 +970,8 @@ public partial class MainWindow : Window
         menu.Items.Add(_forecastTrayItem);
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add("显示 Codex Meter", null, (_, _) => Dispatcher.Invoke(ShowPanel));
-        menu.Items.Add("立即刷新", null, async (_, _) => await Dispatcher.InvokeAsync(RefreshUsageAsync).Task.Unwrap());
+        menu.Items.Add("立即刷新", null, async (_, _) =>
+            await Dispatcher.InvokeAsync(() => RefreshUsageAsync(refreshAccount: true, refreshRemote: true)).Task.Unwrap());
         menu.Items.Add("打开设置", null, (_, _) => Dispatcher.Invoke(OpenSettings));
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add("退出", null, (_, _) => Dispatcher.Invoke(ExitApplication));
@@ -895,6 +1088,7 @@ public partial class MainWindow : Window
         _lifetime.Cancel();
         _refreshTimer.Stop();
         _contextHealthTimer.Stop();
+        _remoteRefreshTimer.Stop();
         SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         SystemEvents.SessionSwitch -= OnSessionSwitch;
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;

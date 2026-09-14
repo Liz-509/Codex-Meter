@@ -6,4 +6,6 @@ work/
 .swiftpm/
 **/bin/
 **/obj/
+**/TestResults/
 .vs/
+.tools/
