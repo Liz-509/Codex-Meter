@@ -146,6 +146,7 @@ class CodexUsageWidget extends HTMLElement {
       this.data.capabilities = { ...this.data.capabilities, ...window.codexMeterInitialCapabilities };
     }
     this.autoHover = this.hasAttribute("native");
+    this.initialLoadPending = this.autoHover;
     this.pinned = this.autoHover && localStorage.getItem("codex-widget-pinned") === "true";
     this.collapsed = this.autoHover ? !this.pinned : localStorage.getItem("codex-widget-collapsed") === "true";
     this.theme = localStorage.getItem("codex-widget-theme") || "auto";
@@ -417,6 +418,7 @@ class CodexUsageWidget extends HTMLElement {
       this.data.syncMessage = payload.error;
       this.data.updatedAt = Date.now();
       this.renderValues();
+      this.finishInitialLoading();
       return;
     }
     const limits = payload.rateLimitsByLimitId?.codex || payload.rateLimits || payload;
@@ -458,6 +460,7 @@ class CodexUsageWidget extends HTMLElement {
       syncMessage: payload.error || "实时数据",
     };
     this.renderValues();
+    this.finishInitialLoading();
     if (this.data.capabilities?.notificationPromptNeeded) this.renderNotificationPrompt();
   }
 
@@ -1840,6 +1843,15 @@ class CodexUsageWidget extends HTMLElement {
     this.applySyncState();
   }
 
+  finishInitialLoading() {
+    if (!this.initialLoadPending) return;
+    this.initialLoadPending = false;
+    const widget = this.shadowRoot.querySelector(".widget");
+    widget?.classList.remove("initial-loading");
+    widget?.setAttribute("aria-busy", "false");
+    this.shadowRoot.querySelector(".initial-loading-overlay")?.setAttribute("aria-hidden", "true");
+  }
+
   applySyncState() {
     const widget = this.shadowRoot.querySelector(".widget");
     if (!widget) return;
@@ -1902,7 +1914,7 @@ class CodexUsageWidget extends HTMLElement {
     const initialContextSupported = Boolean(this.data.capabilities?.contextHealth);
     this.shadowRoot.innerHTML = `
       <style>${this.styles}</style>
-      <section class="widget ${this.collapsed ? "collapsed collapsed-settled compact-motion" : ""}" aria-label="Codex Meter">
+      <section class="widget ${this.collapsed ? "collapsed collapsed-settled compact-motion" : ""} ${this.initialLoadPending ? "initial-loading" : ""}" aria-label="Codex Meter" aria-busy="${this.initialLoadPending}">
         <header>
           <div class="brand">
             <span class="brand-icon" style="--liquid-level:${this.data.primary.remainingPercent ?? 0}">
@@ -1997,6 +2009,23 @@ class CodexUsageWidget extends HTMLElement {
 
           <footer><span class="status-dot"></span><span class="updated">刚刚更新</span><span class="theme-label">跟随系统</span></footer>
         </div>
+        ${this.autoHover ? `
+        <div class="initial-loading-overlay" role="status" aria-live="polite" aria-hidden="${!this.initialLoadPending}">
+          <svg class="initial-loading-gradient" width="0" height="0" aria-hidden="true">
+            <defs>
+              <linearGradient id="initial-loading-star-gradient" x1="3" y1="3" x2="21" y2="21" gradientUnits="userSpaceOnUse">
+                <stop class="initial-loading-gradient-start" />
+                <stop offset="1" class="initial-loading-gradient-end" />
+              </linearGradient>
+            </defs>
+          </svg>
+          <span class="initial-loading-stars" aria-hidden="true">
+            <span class="initial-loading-star initial-loading-star-main">${ICONS.spark}</span>
+            <span class="initial-loading-star initial-loading-star-small initial-loading-star-one">${ICONS.spark}</span>
+            <span class="initial-loading-star initial-loading-star-small initial-loading-star-two">${ICONS.spark}</span>
+          </span>
+          <span class="visually-hidden">正在加载用量数据</span>
+        </div>` : ""}
         <div class="app-dialog" data-dialog="reset" role="dialog" aria-modal="true" aria-labelledby="reset-dialog-title" hidden>
           <div class="dialog-card reset-dialog-card">
             <span class="reset-dialog-icon">${ICONS.reset}</span>
@@ -2072,11 +2101,25 @@ class CodexUsageWidget extends HTMLElement {
 
   get styles() {
     return `
-      :host { --bg:rgba(250,252,255,.86); --panel:rgba(255,255,255,.68); --text:#172033; --muted:#7b8495; --line:rgba(43,55,78,.09); --shadow:0 24px 70px rgba(25,36,62,.18),0 3px 12px rgba(25,36,62,.08); position:fixed; top:24px; right:24px; z-index:2147483647; color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,sans-serif; font-synthesis:none; user-select:none; -webkit-user-select:none; }
-      :host([data-theme="dark"]) { --bg:rgba(24,27,34,.88); --panel:rgba(255,255,255,.055); --text:#f4f6fb; --muted:#969eae; --line:rgba(255,255,255,.085); --shadow:0 28px 80px rgba(0,0,0,.42),0 2px 8px rgba(0,0,0,.25); }
-      @media (prefers-color-scheme:dark) { :host([data-theme="auto"]) { --bg:rgba(24,27,34,.88); --panel:rgba(255,255,255,.055); --text:#f4f6fb; --muted:#969eae; --line:rgba(255,255,255,.085); --shadow:0 28px 80px rgba(0,0,0,.42),0 2px 8px rgba(0,0,0,.25); } }
+      :host { --bg:rgba(250,252,255,.86); --panel:rgba(255,255,255,.68); --text:#172033; --muted:#7b8495; --line:rgba(43,55,78,.09); --shadow:0 24px 70px rgba(25,36,62,.18),0 3px 12px rgba(25,36,62,.08); --loading-backdrop:rgba(244,247,255,.42); --loading-star-start:#7766ee; --loading-star-end:#62a0f5; --loading-star-glow:rgba(95,91,226,.3); position:fixed; top:24px; right:24px; z-index:2147483647; color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,sans-serif; font-synthesis:none; user-select:none; -webkit-user-select:none; }
+      :host([data-theme="dark"]) { --bg:rgba(24,27,34,.88); --panel:rgba(255,255,255,.055); --text:#f4f6fb; --muted:#969eae; --line:rgba(255,255,255,.085); --shadow:0 28px 80px rgba(0,0,0,.42),0 2px 8px rgba(0,0,0,.25); --loading-backdrop:rgba(16,18,25,.46); --loading-star-start:#9a8aff; --loading-star-end:#70b0ff; --loading-star-glow:rgba(119,111,255,.42); }
+      @media (prefers-color-scheme:dark) { :host([data-theme="auto"]) { --bg:rgba(24,27,34,.88); --panel:rgba(255,255,255,.055); --text:#f4f6fb; --muted:#969eae; --line:rgba(255,255,255,.085); --shadow:0 28px 80px rgba(0,0,0,.42),0 2px 8px rgba(0,0,0,.25); --loading-backdrop:rgba(16,18,25,.46); --loading-star-start:#9a8aff; --loading-star-end:#70b0ff; --loading-star-glow:rgba(119,111,255,.42); } }
       * { box-sizing:border-box; }
       .widget { position:relative; width:min(360px,calc(100vw - 32px)); border:1px solid var(--line); border-radius:24px; overflow:hidden; background:var(--bg); box-shadow:var(--shadow); backdrop-filter:blur(28px) saturate(1.35); -webkit-backdrop-filter:blur(28px) saturate(1.35); transition:width .3s cubic-bezier(.2,.8,.2,1),background .2s; }
+      .initial-loading-overlay { position:absolute; inset:0; z-index:40; overflow:hidden; opacity:0; visibility:hidden; pointer-events:none; background:var(--loading-backdrop); backdrop-filter:blur(11px) saturate(.78); -webkit-backdrop-filter:blur(11px) saturate(.78); transition:opacity .2s ease,visibility 0s linear .2s; }
+      .initial-loading .initial-loading-overlay { opacity:1; visibility:visible; pointer-events:auto; transition-delay:0s; }
+      .initial-loading-gradient { position:absolute; }
+      .initial-loading-gradient-start { stop-color:var(--loading-star-start); }
+      .initial-loading-gradient-end { stop-color:var(--loading-star-end); }
+      .initial-loading-stars { position:absolute; top:50%; left:50%; width:58px; height:58px; transform:translate(-50%,-50%); transition:top .28s cubic-bezier(.2,.8,.2,1),left .28s cubic-bezier(.2,.8,.2,1),transform .28s cubic-bezier(.2,.8,.2,1); filter:drop-shadow(0 7px 16px var(--loading-star-glow)); }
+      .collapsed .initial-loading-stars { top:calc(var(--compact-y) + 33px); left:calc(var(--compact-x) + 33px); transform:translate(-50%,-50%) scale(.78); }
+      .initial-loading-star { position:absolute; display:grid; place-items:center; color:var(--loading-star-start); transform-origin:center; }
+      .initial-loading-star svg { display:block; width:100%; height:100%; fill:url(#initial-loading-star-gradient); }
+      .initial-loading-star-main { top:14px; left:14px; width:30px; height:30px; animation:initial-star-breathe 1.8s cubic-bezier(.45,0,.25,1) infinite; }
+      .initial-loading-star-small { opacity:.72; animation:initial-star-glint 1.65s ease-in-out infinite; }
+      .initial-loading-star-one { top:4px; right:5px; width:12px; height:12px; animation-delay:-.2s; }
+      .initial-loading-star-two { bottom:7px; left:5px; width:9px; height:9px; animation-delay:-1s; }
+      .visually-hidden { position:absolute!important; width:1px!important; height:1px!important; padding:0!important; margin:-1px!important; overflow:hidden!important; clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }
       :host([native]) { width:100vw; }
       :host([native]) .widget { --compact-x:0px; --compact-y:0px; --expand-x:33px; --expand-y:33px; width:360px; border:0; box-shadow:none; clip-path:inset(0 0 0 0 round 24px); transition:clip-path .28s cubic-bezier(.2,.8,.2,1),background .2s; }
       :host([native]) .widget.is-transitioning { will-change:clip-path; }
@@ -2413,7 +2456,10 @@ class CodexUsageWidget extends HTMLElement {
       .conversation-tokens { align-self:start; padding:3px 5px; border-radius:6px; color:#159abc; background:rgba(21,154,188,.1); font-size:8px; font-weight:700; white-space:nowrap; }
       .dialog-empty { width:100%; height:100%; display:grid; place-items:center; color:var(--muted); font-size:11px; text-align:center; }
       .loading [data-action="refresh"] svg { animation:spin .8s linear infinite; }
+      :host(.motion-paused) .initial-loading-star { animation-play-state:paused; }
       @keyframes spin { to { transform:rotate(360deg); } }
+      @keyframes initial-star-breathe { 0%,100% { opacity:.76; transform:scale(.88) rotate(-4deg); } 50% { opacity:1; transform:scale(1.08) rotate(5deg); } }
+      @keyframes initial-star-glint { 0%,100% { opacity:.18; transform:scale(.55) rotate(-8deg); } 48% { opacity:.9; transform:scale(1.08) rotate(7deg); } }
       @keyframes liquid-flow { from { transform:translate3d(0,0,0); } to { transform:translate3d(-30px,0,0); } }
       @keyframes liquid-shimmer { from { transform:translate3d(-12%,-5%,0); } to { transform:translate3d(12%,5%,0); } }
       @keyframes liquid-bubbles { 0% { transform:translate3d(0,8px,0); opacity:0; } 18% { opacity:.48; } 82% { opacity:.32; } 100% { transform:translate3d(0,-18px,0); opacity:0; } }

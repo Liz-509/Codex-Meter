@@ -574,7 +574,7 @@ final class CodexUsageService {
                     "clientInfo": [
                         "name": "codex_usage_widget",
                         "title": "Codex Meter",
-                        "version": "1.4.6"
+                        "version": "1.4.7"
                     ]
                 ]
             ], to: input.fileHandleForWriting)

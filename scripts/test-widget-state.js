@@ -4,15 +4,23 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 let Widget;
+let nextElementIsNative = false;
 class FakeHTMLElement {
   attachShadow() {
     this.shadowRoot = { querySelector: () => null, querySelectorAll: () => [] };
     return this.shadowRoot;
   }
 
-  hasAttribute() { return false; }
+  hasAttribute(name) { return name === "native" && nextElementIsNative; }
   setAttribute() {}
 }
+
+const createWidget = ({ native = false } = {}) => {
+  nextElementIsNative = native;
+  const widget = new Widget();
+  nextElementIsNative = false;
+  return widget;
+};
 
 const sandbox = {
   HTMLElement: FakeHTMLElement,
@@ -51,17 +59,66 @@ sandbox.codexMeterInitialCapabilities = {
   currentConversationTokens: true,
   refreshSettings: true,
 };
-const macColdStartWidget = new Widget();
+const macColdStartWidget = createWidget({ native: true });
 macColdStartWidget.render();
 assert.equal(macColdStartWidget.data.capabilities.currentConversationTokens, true, "macOS 静态能力应在首个数据载荷前生效");
 assert.match(macColdStartWidget.shadowRoot.innerHTML, /quota-overview has-live-token-card/, "无数据首屏也应直接使用双圆环布局");
 assert.match(macColdStartWidget.shadowRoot.innerHTML, /context-health-summary is-conversation-token is-empty/, "无数据首屏应直接显示本轮回答占位卡片");
 assert.match(macColdStartWidget.shadowRoot.innerHTML, /live-badge is-complete">等待/, "无数据首屏不得把本轮回答误报为已完成或实时");
+assert.match(macColdStartWidget.shadowRoot.innerHTML, /section class="widget[^"]*initial-loading[^"]*"[^>]*aria-busy="true"/, "原生冷启动应启用首次加载遮罩和 aria-busy");
+assert.match(macColdStartWidget.shadowRoot.innerHTML, /class="initial-loading-overlay" role="status"[^>]*aria-hidden="false"/, "原生冷启动遮罩应提供可访问的加载状态");
 delete sandbox.codexMeterInitialCapabilities;
 
 const widget = new Widget();
 assert.equal(widget.data.capabilities.currentConversationTokens, undefined, "未注入 macOS 能力的旧宿主应继续使用兼容布局");
+widget.render();
+assert.match(widget.shadowRoot.innerHTML, /section class="widget[^"]*"[^>]*aria-busy="false"/, "非原生组件不应进入冷启动加载状态");
+assert.doesNotMatch(widget.shadowRoot.innerHTML, /class="initial-loading-overlay" role="status"/, "非原生组件不应渲染软件冷启动遮罩");
 widget.renderValues = () => {};
+
+macColdStartWidget.renderValues = () => {};
+macColdStartWidget.updateUsage({ partial: true, syncMessage: "正在同步额度", today: { tokens: 12, questions: 1 } });
+assert.equal(macColdStartWidget.initialLoadPending, true, "冷启动 partial 数据不得关闭首次加载遮罩");
+
+const initialLoadingClasses = new Set(["initial-loading"]);
+const initialLoadingAttributes = {};
+const initialLoadingOverlayAttributes = {};
+const initialLoadingWidgetElement = {
+  classList: { remove: (name) => initialLoadingClasses.delete(name) },
+  setAttribute: (name, value) => { initialLoadingAttributes[name] = value; },
+};
+const initialLoadingOverlayElement = {
+  setAttribute: (name, value) => { initialLoadingOverlayAttributes[name] = value; },
+};
+macColdStartWidget.shadowRoot.querySelector = (selector) => selector === ".widget"
+  ? initialLoadingWidgetElement
+  : selector === ".initial-loading-overlay"
+    ? initialLoadingOverlayElement
+    : null;
+macColdStartWidget.updateUsage({
+  rateLimits: {
+    planType: "plus",
+    primary: { remainingPercent: 82 },
+    secondary: { remainingPercent: 64 },
+  },
+  today: { tokens: 120, questions: 2, conversations: [] },
+});
+assert.equal(macColdStartWidget.initialLoadPending, false, "首次完整成功载荷应关闭冷启动遮罩");
+assert.equal(initialLoadingClasses.has("initial-loading"), false, "完整载荷后应移除视觉加载状态");
+assert.equal(initialLoadingAttributes["aria-busy"], "false", "完整载荷后应同步清除 aria-busy");
+assert.equal(initialLoadingOverlayAttributes["aria-hidden"], "true", "完整载荷后应从辅助技术隐藏加载状态");
+macColdStartWidget.updateUsage({ partial: true, syncMessage: "后台刷新中" });
+macColdStartWidget.updateUsage({ error: "后台同步失败" });
+assert.equal(macColdStartWidget.initialLoadPending, false, "后续刷新或错误不得重新启用冷启动遮罩");
+
+const initialErrorWidget = createWidget({ native: true });
+initialErrorWidget.renderValues = () => {};
+initialErrorWidget.updateUsage({ error: "首次连接失败" });
+assert.equal(initialErrorWidget.initialLoadPending, false, "首次完整错误载荷也应结束冷启动遮罩");
+assert.equal(initialErrorWidget.syncState, "error", "关闭遮罩后应保留现有错误状态");
+initialErrorWidget.render();
+assert.match(initialErrorWidget.shadowRoot.innerHTML, /section class="widget(?![^"]*initial-loading)[^"]*"[^>]*aria-busy="false"/, "首次错误后重新渲染也不得恢复遮罩");
+assert.match(initialErrorWidget.shadowRoot.innerHTML, /class="initial-loading-overlay" role="status"[^>]*aria-hidden="true"/, "首次错误后加载状态应对辅助技术隐藏");
 
 let nextFrameID = 1;
 const pendingFrames = new Map();

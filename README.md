@@ -8,7 +8,7 @@ Codex Meter is a lightweight native usage widget for Codex on macOS and Windows.
 
 ## Download and install
 
-- [macOS Apple Silicon installer — Codex Meter v1.4.6](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.6/Codex-Meter-macOS-arm64-v1.4.6.dmg)
+- [macOS Apple Silicon installer — Codex Meter v1.4.7](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.7/Codex-Meter-macOS-arm64-v1.4.7.dmg)
 - [Windows 10/11 x64 installer — Codex Meter v1.4.2](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.2/Codex-Meter-Windows-x64-v1.4.2.exe)
 
 On macOS, open the downloaded DMG and drag `Codex Meter` to the Applications shortcut, then launch it from Applications. On Windows, open the downloaded setup EXE and follow the installer; you can choose the installation location and whether to create a desktop shortcut. The lightweight setup downloads .NET 8 Desktop Runtime and the shared Windows App Runtime only when they are missing, so an internet connection may be required on first install. It then adds the app to the Start menu and registers it in **Installed apps**. Uninstalling Codex Meter does not remove shared runtimes and can preserve or remove the app's local preferences without touching Codex sessions. Intel Mac users can build an installer from source.

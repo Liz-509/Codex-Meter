@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 env:
-  MACOS_RELEASE_VERSION: "1.4.6"
+  MACOS_RELEASE_VERSION: "1.4.7"
   WINDOWS_RELEASE_VERSION: "1.4.2"
 
 jobs:
@@ -184,4 +184,4 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             "release-artifacts/Codex-Meter-macOS-arm64-v${MACOS_RELEASE_VERSION}.dmg" \
             --title "Codex Meter ${GITHUB_REF_NAME}" \
-            --notes "增强 macOS 实时 Token 指标：修复单轮累计与整段累计交替覆盖导致的数值跳变，旧格式日志改为按轮次基线计算；本轮、本对话、今日 Tokens 与今日对话使用平滑数字动画，大数自动缩放完整显示。首页调整为 5 小时与每周额度双圆环，本轮回答改为下方全宽卡片，空数据启动时也保持新布局。设置新增可折叠的实时、常规与 SSH 刷新频率档位，并限制 SSH 最快为 30 秒。本版本仅发布 macOS 安装包，Windows 对应能力仍在开发中。"
+            --notes "新增冷启动加载体验：首次完整数据返回前模糊当前界面，并在中央显示以 Codex Meter 四角星为核心的呼吸微旋动画；折叠和展开状态均保持正确居中。首次请求成功或失败后加载层会平滑退出，后续刷新不再遮挡已有数据。同步补充深浅色主题、减少动态效果、宿主暂停和无障碍状态支持。本版本仅发布 macOS 安装包。"
