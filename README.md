@@ -8,7 +8,7 @@ Codex Meter is a lightweight native usage widget for Codex on macOS and Windows.
 
 ## Download and install
 
-- [macOS Apple Silicon installer — Codex Meter v1.4.2](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.2/Codex-Meter-macOS-arm64-v1.4.2.dmg)
+- [macOS Apple Silicon installer — Codex Meter v1.4.3](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.3/Codex-Meter-macOS-arm64-v1.4.3.dmg)
 - [Windows 10/11 x64 installer — Codex Meter v1.4.2](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.2/Codex-Meter-Windows-x64-v1.4.2.exe)
 
 On macOS, open the downloaded DMG and drag `Codex Meter` to the Applications shortcut, then launch it from Applications. On Windows, open the downloaded setup EXE and follow the installer; you can choose the installation location and whether to create a desktop shortcut. The lightweight setup downloads .NET 8 Desktop Runtime and the shared Windows App Runtime only when they are missing, so an internet connection may be required on first install. It then adds the app to the Start menu and registers it in **Installed apps**. Uninstalling Codex Meter does not remove shared runtimes and can preserve or remove the app's local preferences without touching Codex sessions. Intel Mac users can build an installer from source.
@@ -20,9 +20,9 @@ Because the macOS app is not notarized, macOS may ask you to confirm the first l
 - See the five-hour and weekly Codex limits, including the percentage remaining and the next reset time.
 - Track today's tokens and conversation turns without opening Codex.
 - Open account-wide 7/30/90-day token trends and heatmaps, with local session history filling gaps when account data is unavailable or delayed.
-- Break down local tokens and turns by project and Codex task, then export a rolling seven-day Markdown or CSV report.
+- Break down tokens and turns by project and Codex task on this computer; on macOS, optionally include currently connected Codex SSH servers from Settings, then export a rolling seven-day Markdown or CSV report.
 - Keep the five-hour allowance in the macOS menu bar or Windows system tray, forecast exhaustion from recent pace, and opt into threshold, exhaustion, and recovery notifications.
-- Browse today's local conversation turns, merged by Codex task and labeled with the corresponding task name when available.
+- Browse today's conversation turns from this computer and, after enabling SSH conversation monitoring, currently connected servers, merged by Codex task and labeled with the corresponding task name when available.
 - See the current task's context remaining in a dial beside the five-hour allowance, then open details for recent window occupancy and compaction counts.
 - Redeem an available reset credit after an explicit confirmation. Codex Meter never consumes a credit automatically.
 - Drag the compact icon anywhere, or pin the expanded panel so it stays open. The pin preference is remembered across restarts.
@@ -34,9 +34,9 @@ Because the macOS app is not notarized, macOS may ask you to confirm the first l
 
 | Usage trends | Projects and tasks |
 | --- | --- |
-| ![Seven-day token trend and quota forecast](assets/screenshots/usage-trend.jpg) | ![Local projects and their Codex tasks](assets/screenshots/projects-tasks.jpg) |
+| ![Seven-day token trend and quota forecast](assets/screenshots/usage-trend.jpg) | ![Projects and their Codex tasks](assets/screenshots/projects-tasks.jpg) |
 | **Weekly report and export** | **Today's conversations** |
-| ![Rolling seven-day report with Markdown and CSV export](assets/screenshots/weekly-report.jpg) | ![Today's local conversations grouped by Codex task](assets/screenshots/today-conversations.jpg) |
+| ![Rolling seven-day report with Markdown and CSV export](assets/screenshots/weekly-report.jpg) | ![Today's conversations grouped by Codex task](assets/screenshots/today-conversations.jpg) |
 | **Context health** | **Settings and notifications** |
 | ![Recent context-window health and compaction details](assets/screenshots/context-health.jpg) | ![Launch-at-login, notifications, and menu-bar settings](assets/screenshots/settings-notifications.jpg) |
 
@@ -50,7 +50,7 @@ The interface examples above use sample data. Account and task data from your in
 4. Click **Today Tokens** to open the seven-day usage chart, or **Today Conversations** to inspect today's local turns.
 5. Use the controls in the header to change the theme, refresh immediately, pin or unpin the panel, collapse it, or quit the app.
 
-Codex Meter refreshes automatically every minute after its first successful sync. At startup, it retries rapidly until data arrives. It also refreshes when you press the refresh button and after a reset-credit request. When the panel is not pinned, it collapses after the pointer leaves; open dialogs and active drags keep it expanded. The native host keeps expansion inside the current screen's usable area, including when the icon is close to an edge.
+Codex Meter refreshes automatically every 30 seconds after its first successful sync. At startup, it retries rapidly until data arrives. It also refreshes when you press the refresh button and after a reset-credit request. When the panel is not pinned, it collapses after the pointer leaves; open dialogs and active drags keep it expanded. The native host keeps expansion inside the current screen's usable area, including when the icon is close to an edge.
 
 ## What the numbers mean
 
@@ -61,9 +61,9 @@ Codex Meter refreshes automatically every minute after its first successful sync
 | Weekly limit | Remaining percentage and the time until the weekly window resets | Codex App Server account limits |
 | Reset credits | Credits currently available to reset a supported rate limit | Codex App Server account data |
 | Today Tokens | Account-wide tokens for the local calendar day when available, otherwise locally recorded structured session usage | Account usage buckets with a local fallback |
-| Today Conversations | User conversation turns started today, with prompt previews and per-turn token totals when present | Local structured session events |
+| Today Conversations | User conversation turns started today, with prompt previews and per-turn token totals when present | Structured session events from this computer and opted-in currently connected SSH servers |
 | 7/30/90-day trends | The most recent 90 local calendar days with selectable ranges, using account buckets where available and local data to fill missing dates | Account usage buckets plus local sessions |
-| Projects and tasks | Tokens, turns, and activity grouped from this computer's session working directories and task identifiers | Local session metadata |
+| Projects and tasks | Tokens, turns, and activity grouped by session working directory, server, and task identifier | Session metadata from this computer and opted-in currently connected SSH servers |
 | Usage forecast | A trend estimate derived from remaining-percentage observations in the current quota cycle | Lightweight local quota snapshots |
 | Context health | Follows the currently interacted-with task about every two seconds and retains window occupancy and compaction data for the 20 most recent measurable tasks | Local task metadata and structured session events |
 
@@ -85,9 +85,9 @@ The theme control cycles through **Follow System**, **Light**, and **Dark**. The
 
 ## Reliability and local fallback
 
-Codex Meter reads local session statistics first, so today's activity can appear while account limits are still syncing. Until the first successful account sync, the native host keeps retrying at short intervals. If a later account request fails, local token and conversation details remain available, the panel shows the sync error, and the native host retries after short delays. Regular one-minute refreshes continue afterward.
+Codex Meter reads local session statistics first, so today's activity can appear while account limits are still syncing. Until the first successful account sync, the native host keeps retrying at short intervals. If a later account request fails, local token and conversation details remain available, the panel shows the sync error, and the native host retries after short delays. Regular 30-second refreshes continue afterward.
 
-Structured session files are scanned from `~/.codex/sessions`, or from `$CODEX_HOME/sessions` when `CODEX_HOME` is set. Codex Meter analyzes up to 90 days and caches unchanged files between refreshes. Dates and “today” use the device's current local time zone. Project and task statistics are local-only and may be lower than account-wide daily totals.
+Local structured session files are scanned from `~/.codex/sessions`, or from `$CODEX_HOME/sessions` when `CODEX_HOME` is set. On macOS, SSH conversation monitoring is off by default. Codex Meter shows a one-time guide when it detects an active Codex SSH connection, and the feature can be enabled at any time in Settings. When enabled, it first filters Codex's saved hosts against the system's established SSH connections, then reuses the matching SSH alias, port, and identity to aggregate the same directory with a non-interactive read-only command. Each refresh can therefore take longer, but saved hosts that are not currently connected are never contacted. When disabled, refreshes skip remote session collection entirely. Remote session files are neither copied nor cached locally. Remote hosts require `python3`. Codex Meter analyzes up to 90 days; dates and “today” use the current device's local time zone.
 
 On both platforms, up to 14 days of lightweight quota-percentage snapshots are stored in the platform's local application-data folder for trend forecasting. They contain no prompts, file contents, or credentials. Notifications remain off until the user opts in and grants system permission.
 
@@ -121,7 +121,7 @@ xcode-select --install
 
 Codex Meter starts the local Codex App Server and uses its account endpoints for rate limits, reset times, reset credits, and optional account-wide daily usage buckets. It also requests the recent thread list so local context windows can use their matching Codex task names.
 
-Local session statistics come from structured JSONL events in the Codex sessions directory. Codex Meter uses them to calculate daily token totals, count today's user turns, group turns into context windows, read current window occupancy and compaction events, and display local prompt previews. Account history takes precedence for dates returned by the App Server; missing or delayed dates are filled from local history so today's value does not unnecessarily drop to zero.
+Session statistics come from structured JSONL events in Codex session directories, including currently connected Codex SSH hosts on macOS when SSH conversation monitoring is enabled. Codex Meter uses them to calculate daily token totals, count today's user turns, group turns into context windows, read current window occupancy and compaction events, and display prompt previews. Account history takes precedence for dates returned by the App Server; missing or delayed dates are filled from local and connected SSH history so today's value does not unnecessarily drop to zero.
 
 The first Codex App Server launch may be slower. Codex Meter displays local statistics first and retries account requests automatically when needed.
 
@@ -183,7 +183,7 @@ python3 -m http.server 4173
 
 Then open `http://localhost:4173`.
 
-A native host can implement `window.codexMeterBridge` with `getUsage`, `consumeReset`, `resize`, `quit`, notification-setting methods, `setMenuBarVisible`, and `exportReport`. Native drag support can additionally provide `beginDrag`. Reset, notification-setting, export, and live-context results are delivered through `window.codexResetResult(payload)`, `window.codexNotificationSettingsResult(payload)`, `window.codexExportResult(payload)`, and `window.updateCodexContextHealth(payload)`. The legacy `window.codexUsageBridge.getUsage()` hook remains supported. A web host can provide a matching `GET /api/usage`, or push data directly:
+A native host can implement `window.codexMeterBridge` with `getUsage`, `consumeReset`, `resize`, `quit`, notification and SSH-monitoring setting methods, `setMenuBarVisible`, and `exportReport`. Native drag support can additionally provide `beginDrag`. Reset, notification-setting, SSH-monitoring-setting, export, and live-context results are delivered through `window.codexResetResult(payload)`, `window.codexNotificationSettingsResult(payload)`, `window.codexRemoteSessionSettingsResult(payload)`, `window.codexExportResult(payload)`, and `window.updateCodexContextHealth(payload)`. The legacy `window.codexUsageBridge.getUsage()` hook remains supported. A web host can provide a matching `GET /api/usage`, or push data directly:
 
 ```js
 window.updateCodexUsage(payload);

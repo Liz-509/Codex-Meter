@@ -8,7 +8,7 @@ Codex Meter 是一款适用于 macOS 和 Windows 的轻量级 Codex 原生用量
 
 ## 下载与安装
 
-- [macOS Apple Silicon 安装包 — Codex Meter v1.4.2](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.2/Codex-Meter-macOS-arm64-v1.4.2.dmg)
+- [macOS Apple Silicon 安装包 — Codex Meter v1.4.3](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.3/Codex-Meter-macOS-arm64-v1.4.3.dmg)
 - [Windows 10/11 x64 安装包 — Codex Meter v1.4.2](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.2/Codex-Meter-Windows-x64-v1.4.2.exe)
 
 macOS 用户打开下载的 DMG，将 `Codex Meter` 拖到“应用程序”快捷方式，再从“应用程序”中启动。Windows 用户打开下载的安装 EXE 并按提示操作；可以选择安装位置以及是否创建桌面快捷方式。轻量安装程序只会在系统缺失依赖时下载 .NET 8 Desktop Runtime 和共享 Windows App Runtime，因此首次安装可能需要联网；随后会添加开始菜单入口，并注册到 Windows“已安装的应用”。卸载 Codex Meter 时不会移除共享运行时；卸载程序可选择保留或移除应用偏好设置，不会影响 Codex 会话。Intel Mac 用户可以从源码构建安装包。
@@ -20,10 +20,10 @@ macOS 用户打开下载的 DMG，将 `Codex Meter` 拖到“应用程序”快�
 - 查看 Codex 5 小时额度和每周额度，包括剩余百分比与下次重置时间。
 - 无需打开 Codex，即可掌握今日 Token 用量和对话轮次。
 - 查看账户级最近 7/30/90 天 Token 趋势和热力图；账户数据缺失或延迟时，由本地会话历史补齐。
-- 按本机项目和 Codex 任务分析 Token、轮次与最近活动，并导出最近 7 天 Markdown/CSV 报告。
+- 按本机项目和任务分析 Token、轮次与最近活动；macOS 可在设置中选择加入 Codex 当前已连接的 SSH 服务器，并导出最近 7 天 Markdown/CSV 报告。
 - 在 macOS 菜单栏或 Windows 系统托盘显示 5 小时额度，并根据近期速度估算是否会在重置前耗尽。
 - 经用户主动授权后，在额度跌破 20%、10%、5%、耗尽或新周期恢复时发送系统通知。
-- 浏览今天的本地对话轮次，优先按 Codex 任务合并，并在可用时显示对应的任务名称。
+- 浏览今天的本机对话轮次；启用“监控 SSH 对话”后也包含当前已连接服务器，优先按 Codex 任务合并，并在可用时显示对应的任务名称。
 - 在 5 小时额度右侧通过剩余圆盘查看当前 Codex 任务的上下文健康度，并展开检查最近任务的窗口占用和压缩次数。
 - 在明确确认后使用可用的额度重置次数；Codex Meter 绝不会自动消耗重置次数。
 - 随意拖动紧凑图标，或固定展开面板使其保持打开；固定状态会在重启后保留。
@@ -35,9 +35,9 @@ macOS 用户打开下载的 DMG，将 `Codex Meter` 拖到“应用程序”快�
 
 | 用量趋势 | 项目与任务 |
 | --- | --- |
-| ![最近 7 天 Token 趋势与额度预测](assets/screenshots/usage-trend.jpg) | ![本机项目及其 Codex 任务](assets/screenshots/projects-tasks.jpg) |
+| ![最近 7 天 Token 趋势与额度预测](assets/screenshots/usage-trend.jpg) | ![项目及其 Codex 任务](assets/screenshots/projects-tasks.jpg) |
 | **周报与导出** | **今日对话** |
-| ![最近 7 天周报及 Markdown、CSV 导出](assets/screenshots/weekly-report.jpg) | ![按 Codex 任务聚合的今日本地对话](assets/screenshots/today-conversations.jpg) |
+| ![最近 7 天周报及 Markdown、CSV 导出](assets/screenshots/weekly-report.jpg) | ![按 Codex 任务聚合的今日对话](assets/screenshots/today-conversations.jpg) |
 | **上下文健康度** | **设置与通知** |
 | ![近期上下文窗口健康度与压缩详情](assets/screenshots/context-health.jpg) | ![开机自启动、额度通知和菜单栏设置](assets/screenshots/settings-notifications.jpg) |
 
@@ -51,7 +51,7 @@ macOS 用户打开下载的 DMG，将 `Codex Meter` 拖到“应用程序”快�
 4. 点击 **今日 Tokens** 打开最近 7 天用量图表，或点击 **今日对话** 查看今天的本地对话轮次。
 5. 使用顶部按钮切换主题、立即刷新、固定或取消固定面板、折叠面板或退出应用。
 
-Codex Meter 在首次同步成功后每分钟自动刷新一次。刚启动且尚未取得数据时，会快速连续重试，直到数据返回；点击刷新按钮和完成额度重置请求后也会立即刷新。当面板未固定时，鼠标移开后会自动折叠；打开的对话框和正在进行的拖动会让面板保持展开。即使图标靠近屏幕边缘，原生宿主也会确保展开后的面板处于当前屏幕的可用区域内。
+Codex Meter 在首次同步成功后每 30 秒自动刷新一次。刚启动且尚未取得数据时，会快速连续重试，直到数据返回；点击刷新按钮和完成额度重置请求后也会立即刷新。当面板未固定时，鼠标移开后会自动折叠；打开的对话框和正在进行的拖动会让面板保持展开。即使图标靠近屏幕边缘，原生宿主也会确保展开后的面板处于当前屏幕的可用区域内。
 
 ## 各项数据的含义
 
@@ -62,9 +62,9 @@ Codex Meter 在首次同步成功后每分钟自动刷新一次。刚启动且�
 | 每周额度 | 每周用量窗口的剩余百分比和距离重置的时间 | Codex App Server 账户额度 |
 | 重置次数 | 当前可用于重置受支持额度的次数 | Codex App Server 账户数据 |
 | 今日 Tokens | 优先显示本地日历当天的账户级 Token；不可用时显示本机结构化会话记录 | 账户用量桶，本地数据作为回退 |
-| 今日对话 | 今天开始的用户对话轮次，以及可用的提示词预览和每轮 Token | 本机结构化会话事件 |
+| 今日对话 | 今天开始的用户对话轮次，以及可用的提示词预览和每轮 Token | 本机及选择启用的当前已连接 SSH 服务器的结构化会话事件 |
 | 7/30/90 天趋势 | 最近 90 个本地日历日，可切换范围；优先使用账户数据，并用本地数据补齐缺失日期 | 账户用量桶与本地会话 |
-| 项目与任务 | 按会话工作目录和任务标识聚合，仅代表本机记录 | 本地会话元数据 |
+| 项目与任务 | 按会话工作目录、服务器和任务标识聚合 | 本机及选择启用的当前已连接 SSH 服务器的会话元数据 |
 | 趋势估算 | 根据同一额度周期内的剩余百分比变化估算消耗速度和耗尽时间 | 本地额度快照 |
 | 上下文健康度 | 当前交互对话约 2 秒跟随更新，并保留最近 20 个可测量任务的窗口占用与压缩次数 | 本地任务列表与结构化会话事件 |
 
@@ -86,9 +86,9 @@ Codex Meter 无法购买额度或重置次数，也绝不会在后台自动使�
 
 ## 可靠性与本地回退
 
-Codex Meter 会先读取本地会话统计，因此在账户额度仍在同步时，今日活动就可以先行显示。首次成功取得账户数据之前，原生宿主会持续快速重试。后续账户请求失败时，本地 Token 和对话详情仍然可用，面板会显示同步错误，并在短暂延迟后自动重试；此后仍会继续进行常规的每分钟刷新。
+Codex Meter 会先读取本地会话统计，因此在账户额度仍在同步时，今日活动就可以先行显示。首次成功取得账户数据之前，原生宿主会持续快速重试。后续账户请求失败时，本地 Token 和对话详情仍然可用，面板会显示同步错误，并在短暂延迟后自动重试；此后仍会继续进行常规的每 30 秒刷新。
 
-结构化会话文件来自 `~/.codex/sessions`；设置 `CODEX_HOME` 后则读取 `$CODEX_HOME/sessions`。应用最多分析最近 90 天并缓存未变化的文件。“今日”和日期范围均以设备当前的本地时区为准。项目与任务统计仅来自当前电脑，可能小于账户级每日总量。
+本机结构化会话文件来自 `~/.codex/sessions`；设置 `CODEX_HOME` 后则读取 `$CODEX_HOME/sessions`。macOS 版的“监控 SSH 对话”默认关闭；应用检测到 Codex 当前存在 SSH 连接时会显示一次引导，也可随时在设置中开启。开启后，Codex Meter 会先从系统的已建立 SSH 连接中过滤 Codex 保存的主机，再复用系统 SSH 配置、端口和密钥，以无交互只读命令在这些主机上聚合相同目录，因此每次刷新需要等待 SSH，延时可能增大；仅保存但未连接的主机不会被访问。关闭后刷新完全跳过远程会话读取。远程会话文件不会复制或缓存到本机。远端需要 `python3`。应用最多分析最近 90 天并缓存未变化的本机文件，“今日”和日期范围均以当前设备的本地时区为准。
 
 两个平台都会在各自的本地应用数据目录中保存最多 14 天的轻量额度百分比快照，用于趋势估算。快照不包含提示词、文件内容或账户凭据。通知默认关闭，只有在应用内确认并取得系统授权后才会启用。
 
@@ -122,7 +122,7 @@ xcode-select --install
 
 Codex Meter 会启动本地 Codex App Server，通过账户接口读取额度、重置时间、重置次数，以及可选的账户级每日用量桶；它还会请求近期任务列表，以便为本地上下文窗口匹配对应的 Codex 任务名称。
 
-本地会话统计来自 Codex 会话目录中的结构化 JSONL 事件。Codex Meter 使用这些事件计算每日 Token 总量、统计今日用户轮次、按上下文窗口分组、读取当前窗口占用及压缩次数，并显示本地提示词预览。对于 App Server 已返回的日期，账户历史优先；缺失或延迟的日期则由本地历史补齐，避免今日数值不必要地归零。
+会话统计来自 Codex 会话目录中的结构化 JSONL 事件；macOS 上启用“监控 SSH 对话”后也包括当前已连接的 Codex SSH 主机。Codex Meter 使用这些事件计算每日 Token 总量、统计今日用户轮次、按上下文窗口分组、读取当前窗口占用及压缩次数，并显示提示词预览。对于 App Server 已返回的日期，账户历史优先；缺失或延迟的日期则由本机与已连接的 SSH 会话历史补齐，避免今日数值不必要地归零。
 
 Codex App Server 第一次启动可能较慢。Codex Meter 会先显示本地统计，并在需要时自动重试账户请求。
 
@@ -184,7 +184,7 @@ python3 -m http.server 4173
 
 然后打开 `http://localhost:4173`。
 
-原生宿主可以实现 `window.codexMeterBridge`，提供 `getUsage`、`consumeReset`、`resize`、`quit`、通知设置方法、`setMenuBarVisible` 和 `exportReport`；如需原生拖动支持，还可以提供 `beginDrag`。重置、通知设置、导出及实时上下文结果分别通过 `window.codexResetResult(payload)`、`window.codexNotificationSettingsResult(payload)`、`window.codexExportResult(payload)` 与 `window.updateCodexContextHealth(payload)` 返回。旧版 `window.codexUsageBridge.getUsage()` 钩子仍受支持。Web 宿主可以提供匹配的 `GET /api/usage`，也可以直接推送数据：
+原生宿主可以实现 `window.codexMeterBridge`，提供 `getUsage`、`consumeReset`、`resize`、`quit`、通知与 SSH 监控设置方法、`setMenuBarVisible` 和 `exportReport`；如需原生拖动支持，还可以提供 `beginDrag`。重置、通知设置、SSH 监控设置、导出及实时上下文结果分别通过 `window.codexResetResult(payload)`、`window.codexNotificationSettingsResult(payload)`、`window.codexRemoteSessionSettingsResult(payload)`、`window.codexExportResult(payload)` 与 `window.updateCodexContextHealth(payload)` 返回。旧版 `window.codexUsageBridge.getUsage()` 钩子仍受支持。Web 宿主可以提供匹配的 `GET /api/usage`，也可以直接推送数据：
 
 ```js
 window.updateCodexUsage(payload);

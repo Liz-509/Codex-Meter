@@ -87,7 +87,7 @@ public partial class MainWindow : Window
         SystemEvents.SessionSwitch += OnSessionSwitch;
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
 
-        _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };
+        _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
         _refreshTimer.Tick += async (_, _) => await RefreshUsageAsync();
         _contextHealthTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
         _contextHealthTimer.Tick += async (_, _) => await RefreshCurrentContextHealthAsync();

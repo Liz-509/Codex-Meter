@@ -72,6 +72,8 @@ final class CodexUsageService {
         let projectPath: String
         var preview: String
         var tokens: Int?
+        let threadName: String?
+        let sourceHost: String?
     }
 
     private struct ProjectDailyStats {
@@ -89,6 +91,8 @@ final class CodexUsageService {
         var maxTokens: Int
         var updatedAt: Date
         var compactions: Int
+        let threadName: String?
+        let sourceHost: String?
     }
 
     private struct LocalStats {
@@ -137,6 +141,9 @@ final class CodexUsageService {
     private var sessionWindowKey: String?
     private var projectPathCache: [String: String] = [:]
     private var liveContexts: [String: CachedLiveContext] = [:]
+    private var remoteProjectNames: [String: String] = [:]
+    private var remoteProjectHosts: [String: String] = [:]
+    private let remoteSessions = RemoteSessionCollector()
 
     private enum ServiceError: LocalizedError {
         case binaryMissing
@@ -158,24 +165,27 @@ final class CodexUsageService {
         }
     }
 
-    func fetch(completion: @escaping ([String: Any]) -> Void) {
+    func fetch(includeRemoteSessions: Bool = false, completion: @escaping ([String: Any]) -> Void) {
         workQueue.async {
             let localStats = self.cachedLocalStats()
             var payload = self.localPayload(from: localStats)
 
             var partialPayload = payload
             partialPayload["partial"] = true
-            partialPayload["syncMessage"] = "正在同步额度"
+            partialPayload["syncMessage"] = includeRemoteSessions ? "正在同步远程会话与额度" : "正在同步额度"
             DispatchQueue.main.async {
                 completion(partialPayload)
             }
+
+            let stats = includeRemoteSessions ? self.statsIncludingRemote(local: localStats) : localStats
+            payload = self.localPayload(from: stats)
 
             do {
                 let responses = try self.readAccountData()
                 let limits = try self.result(for: 1, method: "额度", in: responses)
                 let usage = try self.result(for: 2, method: "Token", in: responses)
                 payload = self.localPayload(
-                    from: localStats,
+                    from: stats,
                     threadNames: self.threadNames(from: responses)
                 )
 
@@ -184,9 +194,9 @@ final class CodexUsageService {
                 }
 
                 if let buckets = usage["dailyUsageBuckets"] as? [[String: Any]],
-                   let accountHistory = self.accountHistory(
+                    let accountHistory = self.accountHistory(
                        from: buckets,
-                       localDays: localStats.dailyTokens
+                       localDays: stats.dailyTokens
                    ) {
                     payload["history"] = [
                         "source": "account",
@@ -196,7 +206,7 @@ final class CodexUsageService {
                         }
                     ]
                     var today = payload["today"] as? [String: Any] ?? [:]
-                    today["tokens"] = accountHistory.days.last?.tokens ?? localStats.tokens
+                    today["tokens"] = accountHistory.days.last?.tokens ?? stats.tokens
                     today["tokenSource"] = accountHistory.todayFromAccount ? "account" : "local"
                     payload["today"] = today
                 }
@@ -408,7 +418,7 @@ final class CodexUsageService {
                     "clientInfo": [
                         "name": "codex_usage_widget",
                         "title": "Codex Meter",
-                        "version": "1.4.2"
+                        "version": "1.4.3"
                     ]
                 ]
             ], to: input.fileHandleForWriting)
@@ -526,6 +536,137 @@ final class CodexUsageService {
         return formatter
     }
 
+    private func codexHomeURL() -> URL {
+        let environment = ProcessInfo.processInfo.environment
+        if let configuredHome = environment["CODEX_HOME"], !configuredHome.isEmpty {
+            return URL(fileURLWithPath: configuredHome)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
+    }
+
+    func connectedRemoteHostCount() -> Int {
+        remoteSessions.connectedHosts(codexHome: codexHomeURL()).count
+    }
+
+    private func statsIncludingRemote(local: LocalStats, now: Date = Date()) -> LocalStats {
+        let snapshots = remoteSessions.collect(
+            codexHome: codexHomeURL(),
+            now: now,
+            dayKeys: local.dailyTokens.map(\.date),
+            timezone: .current
+        )
+        guard !snapshots.isEmpty else { return local }
+
+        var daily = Dictionary(uniqueKeysWithValues: local.dailyTokens.map { ($0.date, $0.tokens) })
+        var conversations = Dictionary(uniqueKeysWithValues: local.conversations.map { ("local:\($0.turnId)", $0) })
+        var projects = local.projectDailyTokens
+        var contexts = Dictionary(uniqueKeysWithValues: local.contextHealth.enumerated().map { index, context in
+            ("local:\(context.threadId ?? context.contextWindowId ?? String(index))", context)
+        })
+        remoteProjectNames.removeAll(keepingCapacity: true)
+        remoteProjectHosts.removeAll(keepingCapacity: true)
+
+        for snapshot in snapshots {
+            for (date, tokens) in snapshot.dailyTokens where daily[date] != nil {
+                daily[date, default: 0] += max(0, tokens)
+            }
+            for item in snapshot.conversations {
+                guard let turnID = item["turnId"] as? String,
+                      let startedAt = parseTimestamp(item["startedAt"] as? String),
+                      let date = item["date"] as? String,
+                      let rawProject = item["projectPath"] as? String else { continue }
+                let project = remoteProjectKey(
+                    rawProject,
+                    host: snapshot.host,
+                    projectName: item["projectName"] as? String
+                )
+                let conversation = ConversationStats(
+                    turnId: turnID,
+                    threadId: item["threadId"] as? String,
+                    contextWindowId: item["contextWindowId"] as? String,
+                    startedAt: startedAt,
+                    date: date,
+                    projectPath: project,
+                    preview: item["preview"] as? String ?? "未命名对话",
+                    tokens: (item["tokens"] as? NSNumber)?.intValue,
+                    threadName: item["threadName"] as? String,
+                    sourceHost: snapshot.host.displayName
+                )
+                conversations["\(snapshot.host.id):\(turnID)"] = conversation
+            }
+            for item in snapshot.projectDailyTokens {
+                guard let date = item["date"] as? String,
+                      let rawProject = item["projectPath"] as? String,
+                      let tokens = (item["tokens"] as? NSNumber)?.intValue else { continue }
+                projects.append(ProjectDailyStats(
+                    date: date,
+                    projectPath: remoteProjectKey(
+                        rawProject,
+                        host: snapshot.host,
+                        projectName: item["projectName"] as? String
+                    ),
+                    tokens: max(0, tokens)
+                ))
+            }
+            for (index, item) in snapshot.contextHealth.enumerated() {
+                guard let rawProject = item["projectPath"] as? String,
+                      let used = (item["usedTokens"] as? NSNumber)?.intValue,
+                      let maximum = (item["maxTokens"] as? NSNumber)?.intValue,
+                      maximum > 0,
+                      let updatedAt = parseTimestamp(item["updatedAt"] as? String) else { continue }
+                let context = ContextHealthStats(
+                    threadId: item["threadId"] as? String,
+                    contextWindowId: item["contextWindowId"] as? String,
+                    projectPath: remoteProjectKey(
+                        rawProject,
+                        host: snapshot.host,
+                        projectName: item["projectName"] as? String
+                    ),
+                    preview: item["preview"] as? String ?? "未命名任务",
+                    usedTokens: max(0, used),
+                    maxTokens: maximum,
+                    updatedAt: updatedAt,
+                    compactions: (item["compactions"] as? NSNumber)?.intValue ?? 0,
+                    threadName: item["threadName"] as? String,
+                    sourceHost: snapshot.host.displayName
+                )
+                let key = "\(snapshot.host.id):\(context.threadId ?? context.contextWindowId ?? String(index))"
+                if context.updatedAt > (contexts[key]?.updatedAt ?? .distantPast) { contexts[key] = context }
+            }
+        }
+
+        let projectTotals = Dictionary(grouping: projects, by: { "\($0.date)\u{0}\($0.projectPath)" })
+            .compactMap { key, rows -> ProjectDailyStats? in
+                let parts = key.split(separator: "\u{0}", maxSplits: 1).map(String.init)
+                guard parts.count == 2 else { return nil }
+                return ProjectDailyStats(date: parts[0], projectPath: parts[1], tokens: rows.reduce(0) { $0 + $1.tokens })
+            }
+        return LocalStats(
+            dailyTokens: local.dailyTokens.map {
+                let tokens = daily[$0.date] ?? 0
+                return DailyTokenStats(date: $0.date, tokens: tokens, source: tokens > 0 ? "local" : "empty")
+            },
+            conversations: conversations.values.sorted { $0.startedAt > $1.startedAt },
+            projectDailyTokens: projectTotals,
+            contextHealth: contexts.values.sorted { $0.updatedAt > $1.updatedAt }
+        )
+    }
+
+    private func remoteProjectKey(_ path: String, host: RemoteCodexHost, projectName: String? = nil) -> String {
+        let nonProject = path == Self.nonProjectKey
+        let key = "\(nonProject ? "__remote_non_project__" : "__remote_project__"):\(host.id):\(path)"
+        if nonProject {
+            remoteProjectNames[key] = "\(Self.nonProjectName) · \(host.displayName)"
+        } else {
+            let suppliedName = projectName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = suppliedName.flatMap { $0.isEmpty ? nil : $0 }
+                ?? URL(fileURLWithPath: path).lastPathComponent
+            remoteProjectNames[key] = "\(name.isEmpty ? "未识别项目" : name) · \(host.displayName)"
+        }
+        remoteProjectHosts[key] = host.displayName
+        return key
+    }
+
     private func localPayload(
         from stats: LocalStats,
         threadNames: [String: String] = [:]
@@ -550,10 +691,11 @@ final class CodexUsageService {
                 "lastActive": ISO8601DateFormatter().string(from: conversation.startedAt),
                 "kind": "user"
             ]
+            if let sourceHost = conversation.sourceHost { row["sourceHost"] = sourceHost }
             row["turns"] = ((row["turns"] as? NSNumber)?.intValue ?? 0) + 1
             row["tokens"] = ((row["tokens"] as? NSNumber)?.intValue ?? 0) + (conversation.tokens ?? 0)
-            if let threadID = conversation.threadId,
-               let threadName = threadNames[threadID] {
+            if let threadName = conversation.threadName
+                ?? conversation.threadId.flatMap({ threadNames[$0] }) {
                 row["name"] = threadName
             }
             if let lastValue = row["lastActive"] as? String,
@@ -577,7 +719,7 @@ final class CodexUsageService {
             guard gap > 0 else { continue }
             let parts = key.split(separator: "\u{0}", maxSplits: 1).map(String.init)
             guard parts.count == 2 else { continue }
-            taskRows["\(key)\u{0}system"] = [
+            var systemRow: [String: Any] = [
                 "date": parts[0],
                 "projectKey": parts[1],
                 "projectName": projectNames[parts[1]] ?? "未识别项目",
@@ -589,6 +731,8 @@ final class CodexUsageService {
                 "lastActive": "",
                 "kind": "system"
             ]
+            if let sourceHost = remoteProjectHosts[parts[1]] { systemRow["sourceHost"] = sourceHost }
+            taskRows["\(key)\u{0}system"] = systemRow
         }
 
         let projects: [[String: Any]] = projectNames.map { path, name in
@@ -608,7 +752,7 @@ final class CodexUsageService {
                 let taskID = context.threadId ?? context.contextWindowId ?? "context-\(Int(context.updatedAt.timeIntervalSince1970))"
                 var row: [String: Any] = [
                     "taskId": taskID,
-                    "name": context.threadId.flatMap { threadNames[$0] } ?? context.preview,
+                    "name": context.threadName ?? context.threadId.flatMap { threadNames[$0] } ?? context.preview,
                     "projectKey": context.projectPath,
                     "projectName": projectNames[context.projectPath] ?? "未识别项目",
                     "projectKind": projectKind(for: context.projectPath),
@@ -622,6 +766,7 @@ final class CodexUsageService {
                 ]
                 if let threadID = context.threadId { row["threadId"] = threadID }
                 if let windowID = context.contextWindowId { row["contextWindowId"] = windowID }
+                if let sourceHost = context.sourceHost { row["sourceHost"] = sourceHost }
                 return row
             }
         return [
@@ -636,14 +781,15 @@ final class CodexUsageService {
                         "preview": conversation.preview
                     ]
                     if let threadId = conversation.threadId { item["threadId"] = threadId }
-                    if let threadId = conversation.threadId,
-                       let threadName = threadNames[threadId] {
+                    if let threadName = conversation.threadName
+                        ?? conversation.threadId.flatMap({ threadNames[$0] }) {
                         item["threadName"] = threadName
                     }
                     if let contextWindowId = conversation.contextWindowId {
                         item["contextWindowId"] = contextWindowId
                     }
                     if let tokens = conversation.tokens { item["tokens"] = tokens }
+                    if let sourceHost = conversation.sourceHost { item["sourceHost"] = sourceHost }
                     return item
                 }
             ],
@@ -654,7 +800,7 @@ final class CodexUsageService {
                 }
             ],
             "insights": [
-                "localOnly": true,
+                "localOnly": !stats.projectDailyTokens.contains { $0.projectPath.hasPrefix("__remote_") },
                 "projects": projects,
                 "tasks": taskRows.values.sorted {
                     let leftDate = $0["date"] as? String ?? ""
@@ -687,6 +833,10 @@ final class CodexUsageService {
             result[Self.nonProjectKey] = Self.nonProjectName
         }
         for path in projectPaths {
+            if let remoteName = remoteProjectNames[path] {
+                result[path] = remoteName
+                continue
+            }
             let url = URL(fileURLWithPath: path)
             let base = url.lastPathComponent.isEmpty ? "未识别项目" : url.lastPathComponent
             result[path] = (basenames[base]?.count ?? 0) > 1
@@ -697,7 +847,7 @@ final class CodexUsageService {
     }
 
     private func projectKind(for projectPath: String) -> String {
-        projectPath == Self.nonProjectKey ? "non_project" : "project"
+        projectPath == Self.nonProjectKey || projectPath.hasPrefix("__remote_non_project__:") ? "non_project" : "project"
     }
 
     private func threadNames(from responses: [Int: [String: Any]]) -> [String: String] {
@@ -1013,7 +1163,9 @@ final class CodexUsageService {
                             date: date,
                             projectPath: projectPath,
                             preview: "未命名对话",
-                            tokens: nil
+                            tokens: nil,
+                            threadName: nil,
+                            sourceHost: nil
                         )
                         return
                     }
@@ -1051,7 +1203,9 @@ final class CodexUsageService {
                             usedTokens: max(0, used),
                             maxTokens: maximum,
                             updatedAt: updatedAt,
-                            compactions: compactions
+                            compactions: compactions,
+                            threadName: nil,
+                            sourceHost: nil
                         )
                     }
                     let delta = total >= previousTotal ? total - previousTotal : total

@@ -137,6 +137,9 @@ final class PanelBridge: NSObject, WKScriptMessageHandler {
     var onNotificationAuthorizationRequested: (() -> Void)?
     var onNotificationTestRequested: (() -> Void)?
     var onNotificationPromptDismissed: (() -> Void)?
+    var onRemoteSessionSettingsRequested: (() -> Void)?
+    var onRemoteSessionSettingsChangeRequested: ((Bool) -> Void)?
+    var onRemoteSessionPromptDismissed: (() -> Void)?
     var onMenuBarVisibilityChangeRequested: ((Bool) -> Void)?
     var onExportRequested: ((String) -> Void)?
     private var compactFrame: NSRect?
@@ -217,6 +220,22 @@ final class PanelBridge: NSObject, WKScriptMessageHandler {
 
         if body["action"] as? String == "dismissNotificationPrompt" {
             onNotificationPromptDismissed?()
+            return
+        }
+
+        if body["action"] as? String == "getRemoteSessionSettings" {
+            onRemoteSessionSettingsRequested?()
+            return
+        }
+
+        if body["action"] as? String == "setRemoteSessionMonitoring",
+           let enabled = body["enabled"] as? Bool {
+            onRemoteSessionSettingsChangeRequested?(enabled)
+            return
+        }
+
+        if body["action"] as? String == "dismissRemoteSessionPrompt" {
+            onRemoteSessionPromptDismissed?()
             return
         }
 
@@ -320,6 +339,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private var isRefreshing = false
     private var isResetting = false
     private var refreshAfterReset = false
+    private var refreshAfterSettingsChange = false
     private var refreshTimer: Timer?
     private var contextHealthTimer: Timer?
     private var isRefreshingContextHealth = false
@@ -435,6 +455,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
           dismissNotificationPrompt() {
             window.webkit.messageHandlers.panel.postMessage({ action: 'dismissNotificationPrompt' });
           },
+          getRemoteSessionSettings() {
+            window.webkit.messageHandlers.panel.postMessage({ action: 'getRemoteSessionSettings' });
+          },
+          setRemoteSessionMonitoring(payload) {
+            window.webkit.messageHandlers.panel.postMessage({ action: 'setRemoteSessionMonitoring', enabled: payload?.enabled === true });
+          },
+          dismissRemoteSessionPrompt() {
+            window.webkit.messageHandlers.panel.postMessage({ action: 'dismissRemoteSessionPrompt' });
+          },
           setMenuBarVisible(payload) {
             window.webkit.messageHandlers.panel.postMessage({ action: 'setMenuBarVisible', enabled: payload?.enabled !== false });
           },
@@ -512,6 +541,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         bridge.onNotificationAuthorizationRequested = { [weak self] in self?.requestNotificationAuthorization() }
         bridge.onNotificationTestRequested = { [weak self] in self?.sendTestNotification() }
         bridge.onNotificationPromptDismissed = { [weak self] in self?.dismissNotificationPrompt() }
+        bridge.onRemoteSessionSettingsRequested = { [weak self] in self?.deliverRemoteSessionSettings() }
+        bridge.onRemoteSessionSettingsChangeRequested = { [weak self] enabled in self?.setRemoteSessionMonitoring(enabled) }
+        bridge.onRemoteSessionPromptDismissed = { [weak self] in self?.dismissRemoteSessionPrompt() }
         bridge.onMenuBarVisibilityChangeRequested = { [weak self] enabled in self?.setMenuBarVisible(enabled) }
         bridge.onExportRequested = { [weak self] format in self?.exportReport(format: format) }
         self.webView = webView
@@ -563,8 +595,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         retryWorkItem?.cancel()
         retryWorkItem = nil
         isRefreshing = true
-        usageService.fetch { [weak self] payload in
+        let includeRemoteSessions = defaults.bool(forKey: "remoteSessionMonitoringEnabled")
+        usageService.fetch(includeRemoteSessions: includeRemoteSessions) { [weak self] payload in
             guard let self else { return }
+            if payload["partial"] as? Bool != true,
+               self.refreshAfterReset || self.refreshAfterSettingsChange {
+                self.isRefreshing = false
+                self.refreshAfterReset = false
+                self.refreshAfterSettingsChange = false
+                self.refreshUsage()
+                return
+            }
             var enriched = payload
             enriched["capabilities"] = self.capabilitiesPayload
             if payload["partial"] as? Bool != true, payload["error"] == nil {
@@ -584,11 +625,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
 
             guard payload["partial"] as? Bool != true else { return }
             self.isRefreshing = false
-            if self.refreshAfterReset {
-                self.refreshAfterReset = false
-                self.refreshUsage()
-                return
-            }
             if payload["error"] != nil {
                 if self.hasReceivedUsage {
                     self.scheduleRetry()
@@ -640,13 +676,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     }
 
     private var capabilitiesPayload: [String: Any] {
-        [
+        let remoteSettings = remoteSessionSettingsDictionary()
+        return [
             "extendedInsights": true,
             "notifications": true,
             "menuBar": true,
             "reportExport": true,
             "contextHealth": true,
-            "notificationPromptNeeded": !defaults.bool(forKey: "notificationPromptSeen")
+            "notificationPromptNeeded": !defaults.bool(forKey: "notificationPromptSeen"),
+            "remoteSessionMonitoring": true,
+            "remoteSessionMonitoringEnabled": remoteSettings["enabled"] as? Bool ?? false,
+            "remoteSessionHostCount": remoteSettings["connectedHosts"] as? Int ?? 0,
+            "remoteSessionPromptNeeded": remoteSettings["promptNeeded"] as? Bool ?? false
         ]
     }
 
@@ -817,6 +858,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         deliverNotificationSettings()
     }
 
+    private func remoteSessionSettingsDictionary() -> [String: Any] {
+        let enabled = defaults.bool(forKey: "remoteSessionMonitoringEnabled")
+        let connectedHosts = usageService.connectedRemoteHostCount()
+        return [
+            "supported": true,
+            "enabled": enabled,
+            "connectedHosts": connectedHosts,
+            "promptNeeded": connectedHosts > 0 && !enabled && !defaults.bool(forKey: "remoteSessionPromptSeen")
+        ]
+    }
+
+    private func deliverRemoteSessionSettings() {
+        evaluateJavaScriptCallback(
+            "window.codexRemoteSessionSettingsResult",
+            payload: remoteSessionSettingsDictionary()
+        )
+    }
+
+    private func setRemoteSessionMonitoring(_ enabled: Bool) {
+        defaults.set(enabled, forKey: "remoteSessionMonitoringEnabled")
+        defaults.set(true, forKey: "remoteSessionPromptSeen")
+        deliverRemoteSessionSettings()
+        if isRefreshing {
+            refreshAfterSettingsChange = true
+        } else {
+            refreshUsage()
+        }
+    }
+
+    private func dismissRemoteSessionPrompt() {
+        defaults.set(true, forKey: "remoteSessionPromptSeen")
+        deliverRemoteSessionSettings()
+    }
+
     private func sendTestNotification() {
         let content = UNMutableNotificationContent()
         content.title = "Codex Meter 通知测试"
@@ -945,7 +1020,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
 
     private func startRefreshTimerIfNeeded() {
         guard refreshTimer == nil else { return }
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             self?.refreshUsage()
         }
     }

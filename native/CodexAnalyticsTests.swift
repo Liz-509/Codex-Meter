@@ -8,9 +8,190 @@ enum CodexAnalyticsTests {
         try testLiveContextTailReading()
         try testNonProjectAggregation()
         try testSameNameGitProjects()
+        try testRemoteHostDiscoveryAndDecoding()
+        try testRemoteResponseItemPreview()
         try testForecastAndEvents()
         try testReportFormats()
         print("CodexAnalyticsTests passed")
+    }
+
+    private static func testRemoteHostDiscoveryAndDecoding() throws {
+        let state: [String: Any] = [
+            "codex-managed-remote-connections": [
+                [
+                    "hostId": "remote-ssh-codex-managed:build-box",
+                    "displayName": "Build Box",
+                    "hostname": "developer@10.0.0.8",
+                    "sshPort": 2222,
+                    "identity": "/tmp/test-key"
+                ],
+                [
+                    "hostId": "remote-ssh-discovered:staging",
+                    "displayName": "Staging",
+                    "alias": "staging"
+                ],
+                [
+                    "hostId": "remote-ssh-discovered:staging",
+                    "alias": "duplicate-must-be-ignored"
+                ],
+                ["hostId": "local", "hostname": "localhost"]
+            ],
+            "remote-projects": [[
+                "id": "remote-project-1",
+                "hostId": "remote-ssh-codex-managed:build-box",
+                "remotePath": "/srv/not-a-git-project",
+                "label": "Configured Project"
+            ]],
+            "thread-project-assignments": [
+                "remote-thread": [
+                    "projectKind": "remote",
+                    "projectId": "remote-project-1",
+                    "hostId": "remote-ssh-codex-managed:build-box"
+                ]
+            ],
+            "electron-persisted-atom-state": [
+                "thread-descriptions-v1": ["remote-thread": "Remote task title"]
+            ]
+        ]
+        let stateData = try JSONSerialization.data(withJSONObject: state)
+        let hosts = RemoteSessionCollector.discoverHosts(globalStateData: stateData)
+        expect(hosts.count == 2, "应发现 Codex 保存的托管与 SSH config 主机，并按 hostId 去重")
+        expect(hosts[0] == RemoteCodexHost(
+            id: "remote-ssh-codex-managed:build-box",
+            displayName: "Build Box",
+            destination: "developer@10.0.0.8",
+            port: 2222,
+            identity: "/tmp/test-key"
+        ), "托管主机应保留目标、端口和密钥路径")
+        expect(hosts[1].destination == "staging", "发现型主机应复用 SSH config 别名")
+
+        let metadata = RemoteSessionCollector.metadata(
+            globalStateData: stateData,
+            hostID: "remote-ssh-codex-managed:build-box"
+        )
+        expect(metadata.threadProjectPaths["remote-thread"] == "/srv/not-a-git-project", "应使用 Codex 的远端任务归属识别非 Git 项目")
+        expect(metadata.projectNames["/srv/not-a-git-project"] == "Configured Project", "应保留 Codex 中配置的远端项目名称")
+        expect(metadata.threadNames["remote-thread"] == "Remote task title", "应读取 Codex 保存的远端任务标题")
+
+        let activeEndpoints = RemoteSessionCollector.establishedSSHRemoteEndpointKeys(from: """
+        p14540
+        n192.168.0.76:52823->192.168.0.71:22
+        p18014
+        n[fe80::1]:53259->[fe80::71]:2222
+        n127.0.0.1:53258->127.0.0.1:53268
+        """)
+        expect(activeEndpoints.contains("192.168.0.71|22"), "应识别当前已建立的 IPv4 SSH 远端")
+        expect(activeEndpoints.contains("fe80::71|2222"), "应识别当前已建立的 IPv6 SSH 远端")
+        expect(!activeEndpoints.contains("192.168.8.15|22"), "不得把仅保存但未连接的服务器视为活动连接")
+
+        let duplicateEndpointHost = RemoteCodexHost(
+            id: "remote-ssh-codex-managed:same-address",
+            displayName: "Same Address",
+            destination: "other-user@10.0.0.8",
+            port: 2222,
+            identity: "/tmp/other-key"
+        )
+        let selectedHosts = RemoteSessionCollector.selectConnectedHosts(
+            configuredHosts: hosts + [duplicateEndpointHost],
+            selectedHostID: duplicateEndpointHost.id,
+            resolvedEndpoints: [
+                hosts[0].id: "10.0.0.8|2222",
+                duplicateEndpointHost.id: "10.0.0.8|2222",
+                hosts[1].id: "10.0.0.9|22"
+            ],
+            activeEndpoints: ["10.0.0.8|2222"]
+        )
+        expect(selectedHosts == [duplicateEndpointHost], "同一活动地址对应多个保存项时应去重，并优先采用 Codex 当前选择的主机")
+
+        let response: [String: Any] = [
+            "dailyTokens": ["2033-05-13": 42],
+            "conversations": [["turnId": "remote-turn"]],
+            "projectDailyTokens": [["date": "2033-05-13", "projectPath": "/srv/project", "tokens": 42]],
+            "contextHealth": [["threadId": "remote-thread", "usedTokens": 10, "maxTokens": 100]]
+        ]
+        let responseData = try JSONSerialization.data(withJSONObject: response)
+        let decoded = RemoteSessionCollector.decode(data: responseData, host: hosts[0])
+        expect(decoded?.dailyTokens["2033-05-13"] == 42, "应解码远程每日 Token")
+        expect(decoded?.conversations.count == 1 && decoded?.contextHealth.count == 1, "应解码远程对话与上下文数据")
+    }
+
+    private static func testRemoteResponseItemPreview() throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-meter-remote-preview-tests-\(UUID().uuidString)", isDirectory: true)
+        let sessions = temporary.appendingPathComponent("sessions/2033/05/13", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+
+        let metadata = ["turn_id": "remote-turn"]
+        let objects: [[String: Any]] = [
+            [
+                "timestamp": "2033-05-13T10:00:00Z",
+                "type": "session_meta",
+                "payload": ["id": "remote-thread", "cwd": "/srv/project", "thread_source": "user"]
+            ],
+            [
+                "timestamp": "2033-05-13T10:01:00Z",
+                "type": "event_msg",
+                "payload": ["type": "task_started", "turn_id": "remote-turn"]
+            ],
+            [
+                "timestamp": "2033-05-13T10:01:01Z",
+                "type": "response_item",
+                "payload": [
+                    "type": "message",
+                    "role": "user",
+                    "content": [["type": "input_text", "text": "<app-context>不能作为问题名称</app-context>"]],
+                    "internal_chat_message_metadata_passthrough": metadata
+                ]
+            ],
+            [
+                "timestamp": "2033-05-13T10:01:02Z",
+                "type": "response_item",
+                "payload": [
+                    "type": "message",
+                    "role": "user",
+                    "content": [["type": "input_text", "text": "修复远程对话名称"]],
+                    "internal_chat_message_metadata_passthrough": metadata
+                ]
+            ]
+        ]
+        let lines = try objects.map { object -> String in
+            let data = try JSONSerialization.data(withJSONObject: object)
+            return String(data: data, encoding: .utf8)!
+        }
+        try lines.joined(separator: "\n").write(
+            to: sessions.appendingPathComponent("remote.jsonl"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let indexRows: [[String: Any]] = [
+            ["id": "remote-thread", "thread_name": "旧的远端标题", "updated_at": "2033-05-13T10:00:00Z"],
+            ["id": "remote-thread", "thread_name": "远端 Codex 对话标题", "updated_at": "2033-05-13T10:02:00Z"]
+        ]
+        let indexLines = try indexRows.map { row -> String in
+            let data = try JSONSerialization.data(withJSONObject: row)
+            return String(data: data, encoding: .utf8)!
+        }
+        try indexLines.joined(separator: "\n").write(
+            to: temporary.appendingPathComponent("session_index.jsonl"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let result = RemoteSessionCollector.runAggregationForTesting(
+            codexHome: temporary,
+            config: [
+                "dayKeys": ["2033-05-13"],
+                "historyStart": 0,
+                "timezone": "UTC",
+                "projects": ["/srv/project"],
+                "projectNames": ["/srv/project": "Remote Project"],
+                "threadProjects": ["remote-thread": "/srv/project"],
+                "threadNames": ["remote-thread": "Remote Task"]
+            ]
+        )
+        let conversations = result?["conversations"] as? [[String: Any]] ?? []
+        expect(conversations.first?["preview"] as? String == "修复远程对话名称", "新版远端 response_item 即使没有 content_item_kinds 也应读取用户问题")
+        expect(conversations.first?["threadName"] as? String == "远端 Codex 对话标题", "对话分组应优先使用远端会话索引中的最新 Codex 标题")
     }
 
     private static func testContextHealthAggregation() throws {

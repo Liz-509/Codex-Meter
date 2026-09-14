@@ -48,6 +48,33 @@ vm.runInContext(source, sandbox, { filename: "usage-widget.js" });
 const widget = new Widget();
 widget.renderValues = () => {};
 
+widget.handleRemoteSessionSettings({
+  supported: true,
+  enabled: false,
+  connectedHosts: 2,
+  promptNeeded: true,
+});
+assert.equal(widget.remoteSessionSettings.connectedHosts, 2, "应保存 Codex 当前已连接的 SSH 主机数量");
+assert.equal(widget.data.capabilities.remoteSessionMonitoringEnabled, false, "SSH 对话监控应支持默认关闭");
+assert.equal(widget.data.capabilities.remoteSessionPromptNeeded, true, "发现主机且未开启时应显示一次引导");
+
+widget.handleRemoteSessionSettings({
+  supported: true,
+  enabled: true,
+  connectedHosts: 2,
+  promptNeeded: false,
+});
+assert.equal(widget.data.capabilities.remoteSessionMonitoringEnabled, true, "开启后应同步更新 SSH 监控状态");
+assert.equal(widget.data.capabilities.remoteSessionPromptNeeded, false, "开启后应隐藏 SSH 监控引导");
+
+const remoteSettingsContainer = { innerHTML: "" };
+widget.shadowRoot.querySelector = (selector) => selector === ".remote-session-settings" ? remoteSettingsContainer : null;
+widget.remoteSessionSettings.connectedHosts = 2;
+widget.data.capabilities.remoteSessionHostCount = 1;
+widget.renderRemoteSessionSettings();
+assert.match(remoteSettingsContainer.innerHTML, /读取 1 台当前已连接服务器/, "刷新后的活动连接数应覆盖设置页旧状态");
+widget.shadowRoot.querySelector = () => null;
+
 const compactedTaskGroups = widget.groupConversations([
   {
     threadId: "thread-same-task",
@@ -75,6 +102,13 @@ const legacyContextGroups = widget.groupConversations([
   { contextWindowId: "legacy-b", turnId: "legacy-turn-b", startedAt: "2033-05-13T11:00:00Z" },
 ]);
 assert.equal(legacyContextGroups.length, 2, "缺少任务 ID 的旧载荷仍应按上下文窗口分组");
+
+const localAndRemoteGroups = widget.groupConversations([
+  { threadId: "shared-id", threadName: "本机任务", startedAt: "2033-05-13T10:00:00Z" },
+  { threadId: "shared-id", threadName: "远程任务", sourceHost: "Build Box", startedAt: "2033-05-13T11:00:00Z" },
+]);
+assert.equal(localAndRemoteGroups.length, 2, "本机与远程主机上的任务标识不得错误合并");
+assert.equal(localAndRemoteGroups[0].title, "远程任务 · Build Box", "远程对话标题应标出服务器名称");
 
 const localPayload = (tokens, name, extra = {}) => ({
   ...extra,

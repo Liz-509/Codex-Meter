@@ -273,7 +273,9 @@ enum CodexReportGenerator {
         }
         lines += [
             "",
-            "> 整体每日用量优先采用账户数据，缺失日期由本地会话补齐；项目和任务统计仅来自本机 Codex 会话。",
+            report.hasRemote
+                ? "> 整体每日用量优先采用账户数据，缺失日期由设备会话补齐；项目和任务统计来自本机与当前可达的 SSH 服务器。"
+                : "> 整体每日用量优先采用账户数据，缺失日期由本地会话补齐；项目和任务统计仅来自本机 Codex 会话。",
             ""
         ]
         return lines.joined(separator: "\n")
@@ -283,16 +285,16 @@ enum CodexReportGenerator {
         let report = reportData(from: payload, now: now)
         var rows = [["日期", "项目", "任务", "轮次", "Tokens", "最后活动时间", "数据来源"]]
         rows += report.taskRows.map {
-            [$0.date, $0.project, $0.name, String($0.turns), String($0.tokens), $0.lastActive, "本机"]
+            [$0.date, $0.project, $0.name, String($0.turns), String($0.tokens), $0.lastActive, $0.sourceHost ?? "本机"]
         }
         let text = rows.map { $0.map(csvEscape).joined(separator: ",") }.joined(separator: "\r\n") + "\r\n"
         return Data(([0xEF, 0xBB, 0xBF] as [UInt8]) + Array(text.utf8))
     }
 
     private struct Day { let date: String; let tokens: Int; let source: String }
-    private struct TaskRow { let date: String; let project: String; let projectKind: String; let name: String; let turns: Int; let tokens: Int; let lastActive: String }
+    private struct TaskRow { let date: String; let project: String; let projectKind: String; let name: String; let turns: Int; let tokens: Int; let lastActive: String; let sourceHost: String? }
     private struct Total { let name: String; let project: String; let turns: Int; let tokens: Int }
-    private struct Report { let endDate: String; let totalTokens: Int; let totalTurns: Int; let activeProjectCount: Int; let days: [Day]; let taskRows: [TaskRow]; let projectTotals: [Total]; let taskTotals: [Total] }
+    private struct Report { let endDate: String; let totalTokens: Int; let totalTurns: Int; let activeProjectCount: Int; let days: [Day]; let taskRows: [TaskRow]; let projectTotals: [Total]; let taskTotals: [Total]; let hasRemote: Bool }
 
     private static func reportData(from payload: [String: Any], now: Date) -> Report {
         let formatter = DateFormatter()
@@ -324,7 +326,8 @@ enum CodexReportGenerator {
                 name: item["name"] as? String ?? "未命名任务",
                 turns: (item["turns"] as? NSNumber)?.intValue ?? 0,
                 tokens: (item["tokens"] as? NSNumber)?.intValue ?? 0,
-                lastActive: item["lastActive"] as? String ?? ""
+                lastActive: item["lastActive"] as? String ?? "",
+                sourceHost: item["sourceHost"] as? String
             )
         }.sorted { $0.date == $1.date ? $0.tokens > $1.tokens : $0.date < $1.date }
 
@@ -348,7 +351,8 @@ enum CodexReportGenerator {
             days: days,
             taskRows: taskRows,
             projectTotals: projectTotals,
-            taskTotals: taskTotals
+            taskTotals: taskTotals,
+            hasRemote: taskRows.contains { $0.sourceHost != nil }
         )
     }
 

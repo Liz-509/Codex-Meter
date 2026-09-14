@@ -84,6 +84,7 @@ render_icon 1024 icon_512x512@2x.png
 
 "$swiftc_bin" \
   "$project_dir/native/CompanionApp.swift" \
+  "$project_dir/native/RemoteSessionCollector.swift" \
   "$project_dir/native/CodexUsageService.swift" \
   "$project_dir/native/CodexAnalytics.swift" \
   -o "$macos_dir/CodexUsageCompanion" \

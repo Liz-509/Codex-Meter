@@ -101,6 +101,19 @@ const hostBridge = {
   dismissNotificationPrompt() {
     window.codexMeterBridge?.dismissNotificationPrompt?.();
   },
+  getRemoteSessionSettings() {
+    if (!window.codexMeterBridge?.getRemoteSessionSettings) return false;
+    window.codexMeterBridge.getRemoteSessionSettings();
+    return true;
+  },
+  setRemoteSessionMonitoring(enabled) {
+    if (!window.codexMeterBridge?.setRemoteSessionMonitoring) return false;
+    window.codexMeterBridge.setRemoteSessionMonitoring({ enabled });
+    return true;
+  },
+  dismissRemoteSessionPrompt() {
+    window.codexMeterBridge?.dismissRemoteSessionPrompt?.();
+  },
   openNotificationSettings() {
     window.codexMeterBridge?.openNotificationSettings?.();
   },
@@ -152,6 +165,12 @@ class CodexUsageWidget extends HTMLElement {
       authorization: "notDetermined",
       error: "",
       notice: "",
+    };
+    this.remoteSessionSettings = {
+      supported: false,
+      enabled: false,
+      connectedHosts: 0,
+      promptNeeded: false,
     };
     this.exportMessage = "";
     this.pointerInside = false;
@@ -488,6 +507,7 @@ class CodexUsageWidget extends HTMLElement {
       if (action === "settings") {
         this.openDialog("settings");
         this.requestLaunchAtLoginState();
+        this.requestRemoteSessionSettings();
         this.requestNotificationSettings();
       }
       if (action === "refresh") this.refresh();
@@ -530,6 +550,16 @@ class CodexUsageWidget extends HTMLElement {
         hostBridge.dismissNotificationPrompt();
         this.data.capabilities.notificationPromptNeeded = false;
         this.renderNotificationPrompt();
+      }
+      if (action === "enable-remote-session-monitoring") hostBridge.setRemoteSessionMonitoring(true);
+      if (action === "dismiss-remote-session-prompt") {
+        hostBridge.dismissRemoteSessionPrompt();
+        this.data.capabilities.remoteSessionPromptNeeded = false;
+        this.remoteSessionSettings.promptNeeded = false;
+        this.renderRemoteSessionPrompt();
+      }
+      if (action === "toggle-remote-session-monitoring") {
+        hostBridge.setRemoteSessionMonitoring(!this.remoteSessionSettings.enabled);
       }
       if (action === "open-notification-settings") hostBridge.openNotificationSettings();
       if (action === "toggle-notifications") {
@@ -700,6 +730,59 @@ class CodexUsageWidget extends HTMLElement {
     }
   }
 
+  requestRemoteSessionSettings() {
+    if (!hostBridge.getRemoteSessionSettings()) {
+      this.remoteSessionSettings.supported = false;
+      this.renderRemoteSessionSettings();
+    }
+  }
+
+  handleRemoteSessionSettings(payload = {}) {
+    this.remoteSessionSettings = {
+      ...this.remoteSessionSettings,
+      ...payload,
+    };
+    this.data.capabilities = {
+      ...this.data.capabilities,
+      remoteSessionMonitoring: payload.supported === true,
+      remoteSessionMonitoringEnabled: payload.enabled === true,
+      remoteSessionHostCount: Number(payload.connectedHosts) || 0,
+      remoteSessionPromptNeeded: payload.promptNeeded === true,
+    };
+    this.renderRemoteSessionSettings();
+    this.renderRemoteSessionPrompt();
+  }
+
+  renderRemoteSessionSettings() {
+    const container = this.shadowRoot.querySelector(".remote-session-settings");
+    if (!container) return;
+    const capabilities = this.data.capabilities || {};
+    const supported = this.remoteSessionSettings.supported || capabilities.remoteSessionMonitoring === true;
+    if (!supported) {
+      container.innerHTML = '<div class="setting-note">当前宿主不支持 SSH 对话监控</div>';
+      return;
+    }
+    const enabled = Object.hasOwn(capabilities, "remoteSessionMonitoringEnabled")
+      ? capabilities.remoteSessionMonitoringEnabled === true
+      : this.remoteSessionSettings.enabled === true;
+    const connectedHosts = Object.hasOwn(capabilities, "remoteSessionHostCount")
+      ? Number(capabilities.remoteSessionHostCount) || 0
+      : Number(this.remoteSessionSettings.connectedHosts) || 0;
+    const description = connectedHosts > 0
+      ? `读取 ${connectedHosts} 台当前已连接服务器中的 Codex 对话`
+      : "未检测到 Codex 当前连接的 SSH 服务器";
+    container.innerHTML = `
+      <div class="setting-row">
+        <div class="setting-copy">
+          <strong>监控 SSH 对话</strong>
+          <span>${description}</span>
+          <span class="setting-warning">开启后刷新需要等待 SSH，延时会增大</span>
+        </div>
+        <button class="setting-switch" data-action="toggle-remote-session-monitoring" type="button" role="switch" aria-label="监控 SSH 对话" aria-checked="${enabled}"><span></span></button>
+      </div>
+    `;
+  }
+
   handleNotificationSettings(payload = {}) {
     this.notificationSettings = {
       ...this.notificationSettings,
@@ -747,6 +830,18 @@ class CodexUsageWidget extends HTMLElement {
     const prompt = this.shadowRoot.querySelector(".notification-prompt");
     if (!prompt) return;
     const visible = Boolean(this.data.capabilities?.notifications && this.data.capabilities?.notificationPromptNeeded);
+    prompt.toggleAttribute("hidden", !visible);
+    if (visible) requestAnimationFrame(() => this.syncNativeSize(false));
+  }
+
+  renderRemoteSessionPrompt() {
+    const prompt = this.shadowRoot.querySelector(".remote-session-prompt");
+    if (!prompt) return;
+    const capabilities = this.data.capabilities || {};
+    const visible = Boolean(capabilities.remoteSessionMonitoring && capabilities.remoteSessionPromptNeeded);
+    const connectedHosts = Number(capabilities.remoteSessionHostCount) || 0;
+    const detail = prompt.querySelector("span");
+    if (detail) detail.textContent = `发现 ${connectedHosts} 台已连接服务器；开启后可统计远程对话，刷新会变慢`;
     prompt.toggleAttribute("hidden", !visible);
     if (visible) requestAnimationFrame(() => this.syncNativeSize(false));
   }
@@ -830,7 +925,8 @@ class CodexUsageWidget extends HTMLElement {
       return;
     }
     if (title) title.textContent = "用量洞察";
-    if (subtitle) subtitle.textContent = "趋势估算与本机项目统计";
+    const hasRemote = this.hasRemoteInsights();
+    if (subtitle) subtitle.textContent = hasRemote ? "趋势估算与本机/服务器项目统计" : "趋势估算与本机项目统计";
     tabs?.removeAttribute("hidden");
     this.shadowRoot.querySelectorAll("[data-action='insight-view']").forEach((button) => button.classList.toggle("is-active", button.dataset.view === this.insightView));
     this.shadowRoot.querySelectorAll("[data-action='insight-range']").forEach((button) => button.classList.toggle("is-active", Number(button.dataset.range) === this.insightRange));
@@ -879,6 +975,11 @@ class CodexUsageWidget extends HTMLElement {
     const tasks = Array.isArray(this.data.insights?.tasks) ? this.data.insights.tasks : [];
     const allowed = new Set(this.insightDays(range).map((day) => day.date));
     return tasks.filter((task) => allowed.has(task.date));
+  }
+
+  hasRemoteInsights() {
+    const tasks = Array.isArray(this.data.insights?.tasks) ? this.data.insights.tasks : [];
+    return this.data.insights?.localOnly === false || tasks.some((task) => String(task.sourceHost || "").trim());
   }
 
   renderTrendInsights(body) {
@@ -934,7 +1035,7 @@ class CodexUsageWidget extends HTMLElement {
   renderProjectInsights(body) {
     const rows = this.insightTaskRows();
     if (!rows.length) {
-      body.innerHTML = '<div class="dialog-empty">所选范围内没有本机项目记录</div>';
+      body.innerHTML = '<div class="dialog-empty">所选范围内没有项目记录</div>';
       return;
     }
     const projects = new Map();
@@ -954,7 +1055,8 @@ class CodexUsageWidget extends HTMLElement {
       project.tasks.set(taskKey, task);
       projects.set(key, project);
     }
-    body.innerHTML = `<div class="local-only-note">项目统计仅来自本机；其他任务统一归入“非项目中对话”</div><div class="project-insights">${[...projects.values()].sort((a, b) => b.tokens - a.tokens).map((project) => {
+    const sourceNote = this.hasRemoteInsights() ? "项目统计来自本机与当前可达的 SSH 服务器" : "项目统计来自本机";
+    body.innerHTML = `<div class="local-only-note">${sourceNote}；其他任务统一归入“非项目中对话”</div><div class="project-insights">${[...projects.values()].sort((a, b) => b.tokens - a.tokens).map((project) => {
       const expanded = this.expandedInsightProjects.has(project.key);
       const tasks = [...project.tasks.values()].sort((a, b) => b.tokens - a.tokens);
       return `<section class="insight-project ${expanded ? "is-expanded" : ""}"><button data-action="toggle-insight-project" data-project-key="${this.escapeHTML(project.key)}" type="button"><span class="project-copy"><span class="project-title-row"><strong>${this.escapeHTML(project.name)}</strong><span class="project-token"><b>${this.escapeHTML(this.formatNumber(project.tokens))}</b> Tokens</span></span><small>${project.turns} 轮 · ${tasks.length} 个任务</small></span>${ICONS.chevron}</button><div class="insight-task-list" ${expanded ? "" : "hidden"}>${tasks.map((task) => `<div><span><strong>${this.escapeHTML(task.name)}</strong><small>${task.turns} 轮${task.lastActive ? ` · ${this.escapeHTML(this.shortDateTime(task.lastActive))}` : ""}</small></span><b>${this.escapeHTML(this.formatNumber(task.tokens))} Tokens</b></div>`).join("")}</div></section>`;
@@ -971,7 +1073,8 @@ class CodexUsageWidget extends HTMLElement {
       return (row.projectKind || (row.projectKey === "__non_project__" || name === "非项目中对话" ? "non_project" : "project")) !== "non_project";
     }).map((row) => row.projectKey)).size;
     const topTasks = [...rows].sort((a, b) => Number(b.tokens) - Number(a.tokens)).slice(0, 5);
-    body.innerHTML = `<div class="report-preview"><div class="insight-summary"><span><small>Tokens</small><strong>${this.escapeHTML(this.formatNumber(total))}</strong></span><span><small>轮次</small><strong>${turns}</strong></span><span><small>项目</small><strong>${projects}</strong></span></div><strong class="report-title">最近 7 天 Top 任务</strong>${topTasks.length ? topTasks.map((task) => `<div class="report-task"><span>${this.escapeHTML(task.name || "未命名任务")}</span><b>${this.escapeHTML(this.formatNumber(task.tokens))}</b></div>`).join("") : '<div class="dialog-empty compact-empty">暂无本机任务记录</div>'}<p>整体趋势优先采用账户数据；项目和任务仅来自本机。</p><div class="report-actions"><button data-action="export-report" data-format="md" type="button">导出 Markdown</button><button data-action="export-report" data-format="csv" type="button">导出 CSV</button></div><span class="export-message">${this.escapeHTML(this.exportMessage)}</span></div>`;
+    const taskSource = this.hasRemoteInsights() ? "本机与当前可达的 SSH 服务器" : "本机";
+    body.innerHTML = `<div class="report-preview"><div class="insight-summary"><span><small>Tokens</small><strong>${this.escapeHTML(this.formatNumber(total))}</strong></span><span><small>轮次</small><strong>${turns}</strong></span><span><small>项目</small><strong>${projects}</strong></span></div><strong class="report-title">最近 7 天 Top 任务</strong>${topTasks.length ? topTasks.map((task) => `<div class="report-task"><span>${this.escapeHTML(task.name || "未命名任务")}</span><b>${this.escapeHTML(this.formatNumber(task.tokens))}</b></div>`).join("") : '<div class="dialog-empty compact-empty">暂无任务记录</div>'}<p>整体趋势优先采用账户数据；项目和任务来自${taskSource}。</p><div class="report-actions"><button data-action="export-report" data-format="md" type="button">导出 Markdown</button><button data-action="export-report" data-format="csv" type="button">导出 CSV</button></div><span class="export-message">${this.escapeHTML(this.exportMessage)}</span></div>`;
   }
 
   shortDate(value) {
@@ -1095,7 +1198,9 @@ class CodexUsageWidget extends HTMLElement {
     if (!list || !summary) return;
     const conversations = Array.isArray(this.data.conversations) ? this.data.conversations : [];
     const groups = this.groupConversations(conversations);
-    summary.textContent = `本机记录 · ${groups.length} 个对话 · ${conversations.length} 轮`;
+    const remoteHosts = [...new Set(conversations.map((item) => String(item.sourceHost || "").trim()).filter(Boolean))];
+    const sourceSummary = remoteHosts.length ? `本机 + ${remoteHosts.length} 台服务器` : "本机记录";
+    summary.textContent = `${sourceSummary} · ${groups.length} 个对话 · ${conversations.length} 轮`;
     if (!conversations.length) {
       list.innerHTML = '<div class="dialog-empty">今天还没有可显示的对话</div>';
       return;
@@ -1141,11 +1246,13 @@ class CodexUsageWidget extends HTMLElement {
       const contextWindowId = String(conversation.contextWindowId || "").trim();
       const threadId = String(conversation.threadId || "").trim();
       const turnId = String(conversation.turnId || "").trim();
-      const key = threadId
+      const source = String(conversation.sourceHost || "local").trim();
+      const taskKey = threadId
         ? `thread:${threadId}`
         : contextWindowId
           ? `context:${contextWindowId}`
           : `turn:${turnId || `${conversation.startedAt || "unknown"}:${index}`}`;
+      const key = `${source}:${taskKey}`;
       if (!groupsByKey.has(key)) groupsByKey.set(key, { key, insertionIndex: index, turns: [] });
       groupsByKey.get(key).turns.push({ ...conversation, insertionIndex: index });
     });
@@ -1161,11 +1268,13 @@ class CodexUsageWidget extends HTMLElement {
       const validTimes = group.turns
         .map((conversation) => Date.parse(conversation.startedAt))
         .filter(Number.isFinite);
+      const sourceHost = String(group.turns.find((conversation) => String(conversation.sourceHost || "").trim())?.sourceHost || "").trim();
+      const taskTitle = group.turns.find((conversation) => String(conversation.threadName || "").trim())?.threadName
+        || group.turns[0]?.preview
+        || "未命名对话";
       return {
         ...group,
-        title: group.turns.find((conversation) => String(conversation.threadName || "").trim())?.threadName
-          || group.turns[0]?.preview
-          || "未命名对话",
+        title: sourceHost ? `${taskTitle} · ${sourceHost}` : taskTitle,
         latestAt: validTimes.length ? Math.max(...validTimes) : Number.NEGATIVE_INFINITY,
       };
     }).sort((left, right) => right.latestAt - left.latestAt || left.insertionIndex - right.insertionIndex);
@@ -1465,6 +1574,8 @@ class CodexUsageWidget extends HTMLElement {
     if (this.activeDialog === "context-health") this.renderContextHealth();
     this.applySyncState();
     this.renderNotificationPrompt();
+    this.renderRemoteSessionPrompt();
+    this.renderRemoteSessionSettings();
     requestAnimationFrame(() => this.syncNativeSize(false));
   }
 
@@ -1499,6 +1610,11 @@ class CodexUsageWidget extends HTMLElement {
             <div><strong>开启额度提醒</strong><span>额度偏低、耗尽或恢复时通知你</span></div>
             <button data-action="enable-notifications" type="button">开启</button>
             <button data-action="dismiss-notification-prompt" type="button" aria-label="稍后提醒">稍后</button>
+          </div>
+          <div class="remote-session-prompt" hidden>
+            <div><strong>监控 SSH 对话</strong><span>发现已配置服务器；开启后可统计远程对话，刷新会变慢</span></div>
+            <button data-action="enable-remote-session-monitoring" type="button">开启</button>
+            <button data-action="dismiss-remote-session-prompt" type="button" aria-label="稍后提醒">稍后</button>
           </div>
           <div class="quota-overview">
             <div class="quota-hero">
@@ -1569,6 +1685,7 @@ class CodexUsageWidget extends HTMLElement {
                 </div>
                 <button class="setting-switch" data-action="toggle-startup" type="button" role="switch" aria-label="开机自启动" aria-checked="false"><span></span></button>
               </div>
+              <div class="remote-session-settings"></div>
               <div class="notification-settings"></div>
             </div>
           </div>
@@ -1673,13 +1790,13 @@ class CodexUsageWidget extends HTMLElement {
       .collapsed [data-action="collapse"] { transform:rotate(-90deg); }
       .quota-overview { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); align-items:stretch; gap:8px; }
       .quota-hero { min-width:0; min-height:158px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:0; overflow:hidden; padding:12px 10px 11px; border:1px solid var(--line); border-radius:18px; background:var(--panel); text-align:center; }
-      .notification-prompt { display:grid; grid-template-columns:minmax(0,1fr) auto auto; align-items:center; gap:7px; margin-bottom:10px; padding:9px 10px; border:1px solid rgba(111,99,230,.18); border-radius:13px; background:rgba(111,99,230,.075); }
-      .notification-prompt[hidden] { display:none; }
-      .notification-prompt>div { min-width:0; display:flex; flex-direction:column; gap:2px; }
-      .notification-prompt strong { font-size:10px; }
-      .notification-prompt span { overflow:hidden; color:var(--muted); font-size:8px; text-overflow:ellipsis; white-space:nowrap; }
-      .notification-prompt button { width:auto; height:25px; padding:0 8px; border:1px solid var(--line); font-size:9px; font-weight:650; }
-      .notification-prompt [data-action="enable-notifications"] { color:white; border-color:transparent; background:#6f63e6; }
+      .notification-prompt,.remote-session-prompt { display:grid; grid-template-columns:minmax(0,1fr) auto auto; align-items:center; gap:7px; margin-bottom:10px; padding:9px 10px; border:1px solid rgba(111,99,230,.18); border-radius:13px; background:rgba(111,99,230,.075); }
+      .notification-prompt[hidden],.remote-session-prompt[hidden] { display:none; }
+      .notification-prompt>div,.remote-session-prompt>div { min-width:0; display:flex; flex-direction:column; gap:2px; }
+      .notification-prompt strong,.remote-session-prompt strong { font-size:10px; }
+      .notification-prompt span,.remote-session-prompt span { overflow:hidden; color:var(--muted); font-size:8px; text-overflow:ellipsis; white-space:nowrap; }
+      .notification-prompt button,.remote-session-prompt button { width:auto; height:25px; padding:0 8px; border:1px solid var(--line); font-size:9px; font-weight:650; }
+      .notification-prompt [data-action="enable-notifications"],.remote-session-prompt [data-action="enable-remote-session-monitoring"] { color:white; border-color:transparent; background:#6f63e6; }
       .ring { --value:45; width:82px; height:82px; flex:0 0 auto; display:grid; place-items:center; border-radius:50%; background:conic-gradient(var(--quota-start) calc(var(--value)*1%),rgba(120,126,147,.13) 0); position:relative; box-shadow:inset 0 0 0 1px rgba(255,255,255,.22),0 0 16px var(--quota-glow); transition:background .35s ease,box-shadow .35s ease; }
       .ring::before { content:""; position:absolute; inset:7px; border-radius:inherit; background:var(--bg); box-shadow:inset 0 0 0 1px var(--line); }
       .ring-inner { position:relative; z-index:1; display:flex; flex-direction:column; align-items:center; }
@@ -1762,8 +1879,9 @@ class CodexUsageWidget extends HTMLElement {
       .setting-switch[aria-checked="true"] { background:linear-gradient(135deg,#6559df,#8278ef); }
       .setting-switch[aria-checked="true"] span { transform:translateX(16px); }
       .setting-switch:disabled { cursor:wait; opacity:.55; }
-      .notification-settings { display:flex; flex-direction:column; gap:9px; margin-top:9px; }
-      .notification-settings .setting-row { padding:11px 12px; }
+      .remote-session-settings,.notification-settings { display:flex; flex-direction:column; gap:9px; margin-top:9px; }
+      .remote-session-settings .setting-row,.notification-settings .setting-row { padding:11px 12px; }
+      .setting-copy .setting-warning { color:#c47a15; font-weight:650; }
       .setting-subrows { display:flex; flex-direction:column; padding:5px 11px; border:1px solid var(--line); border-radius:13px; background:rgba(120,126,147,.035); }
       .setting-subrows>div { min-height:34px; display:flex; align-items:center; justify-content:space-between; gap:12px; border-bottom:1px solid var(--line); color:var(--muted); font-size:9px; }
       .setting-subrows>div:last-child { border-bottom:0; }
@@ -1898,6 +2016,7 @@ window.updateCodexContextHealth = (payload) => document.querySelector("codex-usa
 window.codexResetResult = (payload) => document.querySelector("codex-usage-widget")?.handleResetResult(payload);
 window.codexLaunchAtLoginResult = (payload) => document.querySelector("codex-usage-widget")?.handleLaunchAtLoginResult(payload);
 window.codexNotificationSettingsResult = (payload) => document.querySelector("codex-usage-widget")?.handleNotificationSettings(payload);
+window.codexRemoteSessionSettingsResult = (payload) => document.querySelector("codex-usage-widget")?.handleRemoteSessionSettings(payload);
 window.codexExportResult = (payload) => document.querySelector("codex-usage-widget")?.handleExportResult(payload);
 window.recordCodexTurn = (usage) => document.querySelector("codex-usage-widget")?.recordTurn(usage);
 window.codexUsageSetPanelAnchor = (payload) => document.querySelector("codex-usage-widget")?.setPanelAnchor(payload);
@@ -1909,6 +2028,7 @@ window.codexUsageOpenDialog = (kind) => {
   widget?.openDialog(kind);
   if (kind === "settings") {
     widget?.requestLaunchAtLoginState();
+    widget?.requestRemoteSessionSettings();
     widget?.requestNotificationSettings();
   }
 };
