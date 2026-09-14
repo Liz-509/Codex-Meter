@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 env:
-  MACOS_RELEASE_VERSION: "1.4.3"
+  MACOS_RELEASE_VERSION: "1.4.4"
   WINDOWS_RELEASE_VERSION: "1.4.2"
 
 jobs:
@@ -184,4 +184,4 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             "release-artifacts/Codex-Meter-macOS-arm64-v${MACOS_RELEASE_VERSION}.dmg" \
             --title "Codex Meter ${GITHUB_REF_NAME}" \
-            --notes "macOS 新增可选的 SSH 对话监控，仅同步当前已连接的 Codex 服务器；完善远端项目、对话标题和问题名称识别，并将普通完整刷新间隔调整为 30 秒。Windows 的 SSH 对话监控仍在开发中，本版本仅发布 macOS 安装包。"
+            --notes "修复通过 SSH 使用 Codex 时，主面板上下文健康度仍被上一个本机任务占用、无法显示当前远端对话的问题。上下文详情已有更新的远端测量时，主卡片现在会自动跟随；切回并继续本机任务后也会正确恢复。本版本仅发布 macOS 安装包，Windows 的 SSH 对话监控仍在开发中。"

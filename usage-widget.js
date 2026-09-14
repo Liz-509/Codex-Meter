@@ -1097,8 +1097,21 @@ class CodexUsageWidget extends HTMLElement {
 
   currentContextHealthSession() {
     const currentTaskId = String(this.data.contextHealth?.currentTaskId || "");
+    const sessions = this.contextHealthSessions();
     if (!currentTaskId) return null;
-    return this.contextHealthSessions().find((session) => String(session.threadId || session.taskId || "") === currentTaskId) || null;
+    const current = sessions.find((session) => String(session.threadId || session.taskId || "") === currentTaskId) || null;
+
+    // The local App Server cannot list a task that is running through an SSH host,
+    // so currentTaskId can remain pinned to the last local task while the remote
+    // collector is already returning the active task's context measurement. In
+    // that case prefer the newer remote measurement. Keep the exact local match
+    // when it is at least as recent so switching back to a local task still wins.
+    const latestRemote = sessions
+      .filter((session) => session?.sourceHost)
+      .sort((left, right) => String(right.lastActive || "").localeCompare(String(left.lastActive || "")))[0] || null;
+    if (!latestRemote) return current;
+    if (!current || String(latestRemote.lastActive || "") > String(current.lastActive || "")) return latestRemote;
+    return current;
   }
 
   contextHealthStatus(session) {

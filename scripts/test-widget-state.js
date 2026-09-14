@@ -189,6 +189,40 @@ for (const [usedPercent, expectedStatus, expectedRemaining] of [
 contextSummaryWidget.data.capabilities = {};
 assert.equal(contextSummaryWidget.contextHealthSummaryState().supported, false, "旧宿主未声明 capability 时应隐藏上下文圆盘");
 
+const remoteContextSummaryWidget = new Widget();
+remoteContextSummaryWidget.data.capabilities = { contextHealth: true };
+remoteContextSummaryWidget.data.contextHealth = {
+  currentTaskId: "last-local-task",
+  currentTaskName: "上一个本机任务",
+  sessions: [
+    {
+      taskId: "last-local-task",
+      threadId: "last-local-task",
+      name: "上一个本机任务",
+      usedPercent: 20,
+      remainingPercent: 80,
+      lastActive: "2033-05-13T10:00:00Z",
+    },
+    {
+      taskId: "active-ssh-task",
+      threadId: "active-ssh-task",
+      name: "当前 SSH 任务",
+      sourceHost: "Build Box",
+      usedPercent: 70,
+      remainingPercent: 30,
+      lastActive: "2033-05-13T10:05:00Z",
+    },
+  ],
+};
+let remoteContextSummary = remoteContextSummaryWidget.contextHealthSummaryState();
+assert.equal(remoteContextSummary.available, true, "SSH 当前任务存在上下文时主卡片不应显示为空");
+assert.equal(remoteContextSummary.detail, "当前 SSH 任务", "本机 App Server 仍指向旧任务时应展示更新的 SSH 上下文");
+assert.equal(remoteContextSummary.remaining, 30, "SSH 当前任务的剩余上下文比例应显示在主卡片");
+
+remoteContextSummaryWidget.data.contextHealth.sessions[0].lastActive = "2033-05-13T10:10:00Z";
+remoteContextSummary = remoteContextSummaryWidget.contextHealthSummaryState();
+assert.equal(remoteContextSummary.detail, "上一个本机任务", "切回并继续本机任务后应恢复精确匹配的本机上下文");
+
 widget.updateCurrentContextHealth({
   contextHealth: {
     currentTaskId: "thread-current",
