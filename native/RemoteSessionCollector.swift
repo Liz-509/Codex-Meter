@@ -177,6 +177,8 @@ try:
         context = None
         current_turn_active = False
         turn_totals = {}
+        authoritative_turns = set()
+        legacy_turn_baselines = {}
 
         with lines:
             for line in lines:
@@ -207,6 +209,7 @@ try:
                         current_turn = payload.get("turn_id") or str(uuid.uuid4())
                         current_turn_active = True
                         turn_totals.setdefault(current_turn, 0)
+                        legacy_turn_baselines[current_turn] = previous_total
                         date_key = day(obj.get("timestamp"))
                         if include_conversations and date_key in daily:
                             conversations[current_turn] = {
@@ -245,8 +248,10 @@ try:
                     if not isinstance(total, (int, float)):
                         continue
                     total = max(0, int(total))
-                    if current_turn is not None:
-                        turn_totals[current_turn] = total
+                    if current_turn is not None and current_turn not in authoritative_turns:
+                        baseline = legacy_turn_baselines.get(current_turn, previous_total)
+                        turn_total = total - baseline if total >= baseline else total
+                        turn_totals[current_turn] = max(turn_totals.get(current_turn, 0), turn_total)
                     maximum = info.get("model_context_window")
                     last_usage = info.get("last_token_usage")
                     used = last_usage.get("total_tokens") if isinstance(last_usage, dict) else None
@@ -302,6 +307,7 @@ try:
                     turn_tokens = turn_usage.get("total_tokens") if isinstance(turn_usage, dict) else None
                     if turn_id is not None and isinstance(turn_tokens, (int, float)):
                         turn_totals[turn_id] = max(0, int(turn_tokens))
+                        authoritative_turns.add(turn_id)
                     if conversation is not None and isinstance(turn_tokens, (int, float)):
                         conversation["tokens"] = max(0, int(turn_tokens))
                     usage_record_since_count = counted

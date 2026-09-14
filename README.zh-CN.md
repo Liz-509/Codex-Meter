@@ -8,7 +8,7 @@ Codex Meter 是一款适用于 macOS 和 Windows 的轻量级 Codex 原生用量
 
 ## 下载与安装
 
-- [macOS Apple Silicon 安装包 — Codex Meter v1.4.5](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.5/Codex-Meter-macOS-arm64-v1.4.5.dmg)
+- [macOS Apple Silicon 安装包 — Codex Meter v1.4.6](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.6/Codex-Meter-macOS-arm64-v1.4.6.dmg)
 - [Windows 10/11 x64 安装包 — Codex Meter v1.4.2](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.2/Codex-Meter-Windows-x64-v1.4.2.exe)
 
 macOS 用户打开下载的 DMG，将 `Codex Meter` 拖到“应用程序”快捷方式，再从“应用程序”中启动。Windows 用户打开下载的安装 EXE 并按提示操作；可以选择安装位置以及是否创建桌面快捷方式。轻量安装程序只会在系统缺失依赖时下载 .NET 8 Desktop Runtime 和共享 Windows App Runtime，因此首次安装可能需要联网；随后会添加开始菜单入口，并注册到 Windows“已安装的应用”。卸载 Codex Meter 时不会移除共享运行时；卸载程序可选择保留或移除应用偏好设置，不会影响 Codex 会话。Intel Mac 用户可以从源码构建安装包。
@@ -24,7 +24,7 @@ macOS 用户打开下载的 DMG，将 `Codex Meter` 拖到“应用程序”快�
 - 在 macOS 菜单栏或 Windows 系统托盘显示 5 小时额度，并根据近期速度估算是否会在重置前耗尽。
 - 经用户主动授权后，在额度跌破 20%、10%、5%、耗尽或新周期恢复时发送系统通知。
 - 浏览今天的本机对话轮次；启用“监控 SSH 对话”后也包含当前已连接服务器，优先按 Codex 任务合并，并在可用时显示对应的任务名称。
-- macOS 在 5 小时额度右侧实时显示本轮回答与当前对话累计 Tokens，并同时提示上下文剩余比例；数字变化使用平滑动画。
+- macOS 以双圆环并列显示 5 小时与每周额度，并在下方全宽卡片实时显示本轮回答、当前对话累计 Tokens 和上下文剩余比例；数字变化使用平滑动画。
 - 在明确确认后使用可用的额度重置次数；Codex Meter 绝不会自动消耗重置次数。
 - 随意拖动紧凑图标，或固定展开面板使其保持打开；固定状态会在重启后保留。
 - 跟随系统外观，或手动选择浅色、深色模式。
@@ -51,7 +51,7 @@ macOS 用户打开下载的 DMG，将 `Codex Meter` 拖到“应用程序”快�
 4. 点击 **今日 Tokens** 打开最近 7 天用量图表，或点击 **今日对话** 查看今天的本地对话轮次。
 5. 使用顶部按钮切换主题、立即刷新、固定或取消固定面板、折叠面板或退出应用。
 
-Codex Meter 在首次同步成功后每 30 秒自动刷新一次。刚启动且尚未取得数据时，会快速连续重试，直到数据返回；点击刷新按钮和完成额度重置请求后也会立即刷新。当面板未固定时，鼠标移开后会自动折叠；打开的对话框和正在进行的拖动会让面板保持展开。即使图标靠近屏幕边缘，原生宿主也会确保展开后的面板处于当前屏幕的可用区域内。
+Codex Meter 默认每 2 秒更新当前回答与上下文、每 30 秒更新账户及本机统计；SSH 监控启用后默认每 60 秒更新远端数据。macOS 设置页可以分别选择三组刷新档位，SSH 最快为 30 秒并带有网络、耗电与远端负载提醒。刚启动且尚未取得数据时，会快速连续重试，直到数据返回；点击刷新按钮和完成额度重置请求后也会立即刷新。当面板未固定时，鼠标移开后会自动折叠；打开的对话框和正在进行的拖动会让面板保持展开。即使图标靠近屏幕边缘，原生宿主也会确保展开后的面板处于当前屏幕的可用区域内。
 
 ## 各项数据的含义
 
@@ -70,7 +70,7 @@ Codex Meter 在首次同步成功后每 30 秒自动刷新一次。刚启动且�
 
 额度低于 20% 时指示器变为黄色，低于 10% 时变为红色。重置时间以相对倒计时显示。“今日对话”窗口优先按 Codex 任务 ID 合并压缩前后的上下文窗口，展示每个任务的时间范围和 Token 总数，并可展开查看单轮详情；旧载荷缺少任务 ID 时才按上下文窗口分组。如果本地 App Server 能够匹配任务，就会使用 Codex 任务名称；否则回退到第一条本地提示词。
 
-macOS 主面板以本轮回答为主指标：优先读取 `token_usage_record.turn_token_usage.total_tokens`，旧日志回退到 `token_count.info.total_token_usage.total_tokens`，回答过程中约每 2 秒更新。当前对话累计值是同一任务内各轮最新 Token 值之和，因此开始新问题或压缩上下文都不会错误归零。卡片底部同时显示当前上下文的剩余比例，点击可查看详情。上下文健康度使用模型直接上报的当前窗口 Token 和上下文上限计算；已用比例低于 60% 为“健康”，60%–79% 为“注意”，80%–89% 为“紧张”，90% 及以上为“危险”。本轮、当前对话、上下文窗口、今日用量和账户额度是五个独立指标。SSH 对话沿用常规刷新频率；Windows 的本轮与当前对话 Token 尚待接入。
+macOS 主面板以本轮回答为主指标：优先读取 `token_usage_record.turn_token_usage.total_tokens`，该轮出现权威记录后不再被整段累计覆盖；仅有旧格式时，以轮次开始时的 `token_count.info.total_token_usage.total_tokens` 为基线计算增量。当前对话累计值是同一任务内各轮最新 Token 值之和，因此开始新问题或压缩上下文都不会错误归零。大 Token 数会自动缩小字号，不会在主卡片或今日 Tokens 卡片中显示省略号。首页第一行以双圆环显示 5 小时和每周额度，本轮回答在下一行横向展示，并保留上下文剩余进度与详情入口。刷新频率在设置中以默认收起的列表显示。上下文健康度使用模型直接上报的当前窗口 Token 和上下文上限计算；已用比例低于 60% 为“健康”，60%–79% 为“注意”，80%–89% 为“紧张”，90% 及以上为“危险”。本轮、当前对话、上下文窗口、今日用量和账户额度是五个独立指标。SSH 对话使用独立且不低于 30 秒的刷新档位；Windows 的本轮、当前对话 Token 与刷新设置尚待接入。
 
 ## 额度重置次数
 
@@ -86,9 +86,9 @@ Codex Meter 无法购买额度或重置次数，也绝不会在后台自动使�
 
 ## 可靠性与本地回退
 
-Codex Meter 会先读取本地会话统计，因此在账户额度仍在同步时，今日活动就可以先行显示。首次成功取得账户数据之前，原生宿主会持续快速重试。后续账户请求失败时，本地 Token 和对话详情仍然可用，面板会显示同步错误，并在短暂延迟后自动重试；此后仍会继续进行常规的每 30 秒刷新。
+Codex Meter 会先读取本地会话统计，因此在账户额度仍在同步时，今日活动就可以先行显示。首次成功取得账户数据之前，原生宿主会持续快速重试。后续账户请求失败时，本地 Token 和对话详情仍然可用，面板会显示同步错误，并在短暂延迟后自动重试；此后仍会按照设置中的常规数据档位刷新。
 
-本机结构化会话文件来自 `~/.codex/sessions`；设置 `CODEX_HOME` 后则读取 `$CODEX_HOME/sessions`。macOS 版的“监控 SSH 对话”默认关闭；应用检测到 Codex 当前存在 SSH 连接时会显示一次引导，也可随时在设置中开启。开启后，Codex Meter 会先从系统的已建立 SSH 连接中过滤 Codex 保存的主机，再复用系统 SSH 配置、端口和密钥，以无交互只读命令在这些主机上聚合相同目录，因此每次刷新需要等待 SSH，延时可能增大；仅保存但未连接的主机不会被访问。关闭后刷新完全跳过远程会话读取。远程会话文件不会复制或缓存到本机。远端需要 `python3`。应用最多分析最近 90 天并缓存未变化的本机文件，“今日”和日期范围均以当前设备的本地时区为准。
+本机结构化会话文件来自 `~/.codex/sessions`；设置 `CODEX_HOME` 后则读取 `$CODEX_HOME/sessions`。macOS 版的“监控 SSH 对话”默认关闭；应用检测到 Codex 当前存在 SSH 连接时会显示一次引导，也可随时在设置中开启。开启后，Codex Meter 会先从系统的已建立 SSH 连接中过滤 Codex 保存的主机，再复用系统 SSH 配置、端口和密钥，以无交互只读命令在这些主机上聚合相同目录，因此每次刷新需要等待 SSH，延时可能增大；仅保存但未连接的主机不会被访问。关闭后刷新完全跳过远程会话读取。应用仅在内存中保留最近一次成功聚合的远端快照，远程会话文件不会复制或持久化缓存到本机。远端需要 `python3`。应用最多分析最近 90 天并缓存未变化的本机文件，“今日”和日期范围均以当前设备的本地时区为准。
 
 两个平台都会在各自的本地应用数据目录中保存最多 14 天的轻量额度百分比快照，用于趋势估算。快照不包含提示词、文件内容或账户凭据。通知默认关闭，只有在应用内确认并取得系统授权后才会启用。
 
@@ -184,7 +184,7 @@ python3 -m http.server 4173
 
 然后打开 `http://localhost:4173`。
 
-原生宿主可以实现 `window.codexMeterBridge`，提供 `getUsage`、`consumeReset`、`resize`、`quit`、通知与 SSH 监控设置方法、`setMenuBarVisible` 和 `exportReport`；如需原生拖动支持，还可以提供 `beginDrag`。重置、通知设置、SSH 监控设置、导出及实时上下文结果分别通过 `window.codexResetResult(payload)`、`window.codexNotificationSettingsResult(payload)`、`window.codexRemoteSessionSettingsResult(payload)`、`window.codexExportResult(payload)` 与 `window.updateCodexContextHealth(payload)` 返回。旧版 `window.codexUsageBridge.getUsage()` 钩子仍受支持。Web 宿主可以提供匹配的 `GET /api/usage`，也可以直接推送数据：
+原生宿主可以实现 `window.codexMeterBridge`，提供 `getUsage`、`consumeReset`、`resize`、`quit`、通知、SSH 监控与刷新频率设置方法、`setMenuBarVisible` 和 `exportReport`；如需原生拖动支持，还可以提供 `beginDrag`。重置、通知设置、SSH 监控设置、刷新频率、导出及实时上下文结果分别通过 `window.codexResetResult(payload)`、`window.codexNotificationSettingsResult(payload)`、`window.codexRemoteSessionSettingsResult(payload)`、`window.codexRefreshSettingsResult(payload)`、`window.codexExportResult(payload)` 与 `window.updateCodexContextHealth(payload)` 返回。旧版 `window.codexUsageBridge.getUsage()` 钩子仍受支持。Web 宿主可以提供匹配的 `GET /api/usage`，也可以直接推送数据：
 
 ```js
 window.updateCodexUsage(payload);
@@ -193,7 +193,7 @@ window.recordCodexTurn({ inputTokens: 1200, outputTokens: 480 });
 
 宿主可以在用量载荷中选择性提供 `today.tokenSource`、`today.conversations` 和 `history.dailyTokens`，以填充详情对话框。对话条目可以包含 `contextWindowId` 和 `threadName`；对旧载荷分组时，组件会依次回退到 `threadId` 和 `turnId`，任务名称不可用时则使用第一条提示词。旧版载荷仍然兼容；缺少这些字段时，详情界面会显示为空状态。
 
-扩展宿主还可以提供 `insights.projects`、`insights.tasks`、`contextHealth.sessions`、`forecast.primary`、`forecast.secondary` 和能力标志。上下文条目包含任务/项目标识、可选的 `conversationTokens`、`currentTurnId`、`currentTurnTokens`、`currentTurnActive`、`usedTokens`、`maxTokens`、`usedPercent`、`remainingPercent`、`status`、`lastActive` 与 `compactions`；声明 `capabilities.contextHealth` 后会显示上下文入口，同时声明 `capabilities.currentConversationTokens` 后主卡片会显示本轮与本对话 Token。项目和任务条目可用 `projectKind` 标记 `project` 或 `non_project`；桌面宿主将不能解析到 Git 根目录的会话统一显示为“非项目中对话”。刷新期间的 `partial` 载荷只用于冷启动占位，已有完整快照时不会覆盖稳定的历史、任务、上下文、预测或报告数据。未声明 `capabilities.extendedInsights` 时，共享组件继续显示旧版 7 天图表，避免嵌入式旧宿主出现不可用入口。
+扩展宿主还可以提供 `insights.projects`、`insights.tasks`、`contextHealth.sessions`、`forecast.primary`、`forecast.secondary` 和能力标志。上下文条目包含任务/项目标识、可选的 `conversationTokens`、`currentTurnId`、`currentTurnTokens`、`currentTurnActive`、`usedTokens`、`maxTokens`、`usedPercent`、`remainingPercent`、`status`、`lastActive` 与 `compactions`；声明 `capabilities.contextHealth` 后会显示上下文入口，同时声明 `capabilities.currentConversationTokens` 后主卡片会显示本轮与本对话 Token。`capabilities.refreshSettings` 启用实时回答、常规数据和 SSH 数据三组刷新档位。项目和任务条目可用 `projectKind` 标记 `project` 或 `non_project`；桌面宿主将不能解析到 Git 根目录的会话统一显示为“非项目中对话”。刷新期间的 `partial` 载荷只用于冷启动占位，已有完整快照时不会覆盖稳定的历史、任务、上下文、预测或报告数据。未声明 `capabilities.extendedInsights` 时，共享组件继续显示旧版 7 天图表，避免嵌入式旧宿主出现不可用入口。
 
 ## 隐私
 

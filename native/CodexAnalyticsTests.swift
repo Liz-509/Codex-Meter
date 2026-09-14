@@ -3,6 +3,7 @@ import Foundation
 @main
 enum CodexAnalyticsTests {
     static func main() throws {
+        try testRefreshPreferences()
         try testNinetyDaySessionAggregation()
         try testContextHealthAggregation()
         try testLiveContextTailReading()
@@ -10,9 +11,49 @@ enum CodexAnalyticsTests {
         try testSameNameGitProjects()
         try testRemoteHostDiscoveryAndDecoding()
         try testRemoteResponseItemPreview()
+        try testCachedRemoteComposition()
         try testForecastAndEvents()
         try testReportFormats()
         print("CodexAnalyticsTests passed")
+    }
+
+    private static func testRefreshPreferences() throws {
+        let suite = "CodexMeterRefreshTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            throw TestFailure("无法创建刷新设置测试 UserDefaults")
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        var preferences = RefreshPreferences(defaults: defaults)
+        expect(preferences == RefreshPreferences(liveSeconds: 2, generalSeconds: 30, sshSeconds: 60), "刷新设置应使用安全默认值")
+
+        preferences.update(from: ["liveSeconds": 1, "generalSeconds": 120, "sshSeconds": 30])
+        preferences.persist(to: defaults)
+        expect(RefreshPreferences(defaults: defaults) == preferences, "有效刷新档位应持久化")
+
+        var invalid = RefreshPreferences(liveSeconds: 2, generalSeconds: 30, sshSeconds: 60)
+        invalid.update(from: ["liveSeconds": 3, "generalSeconds": 12, "sshSeconds": 5])
+        expect(invalid == RefreshPreferences(liveSeconds: 2, generalSeconds: 30, sshSeconds: 60), "非法档位不得覆盖当前设置")
+
+        defaults.set(999, forKey: "liveRefreshIntervalSeconds")
+        defaults.set(1, forKey: "generalRefreshIntervalSeconds")
+        defaults.set(10, forKey: "sshRefreshIntervalSeconds")
+        let recovered = RefreshPreferences(defaults: defaults)
+        expect(recovered == RefreshPreferences(liveSeconds: 2, generalSeconds: 30, sshSeconds: 60), "损坏的持久化值应回退默认档位")
+        let payload = preferences.payload
+        expect(payload["liveOptions"] as? [Int] == [1, 2, 5, 10], "宿主应返回实时刷新白名单")
+        expect(payload["sshOptions"] as? [Int] == [30, 60, 120, 300], "SSH 最快档位必须为 30 秒")
+
+        var requests = RefreshRequestAccumulator()
+        requests.enqueue(general: true, remote: false, remoteEnabled: true)
+        requests.enqueue(general: false, remote: true, remoteEnabled: true)
+        expect(requests.take(remoteEnabled: true) == RefreshRequest(general: true, remote: true), "同时到期的常规与 SSH 请求应合并")
+        expect(requests.take(remoteEnabled: true) == nil, "取出请求后不得重复执行")
+        requests.enqueue(general: false, remote: true, remoteEnabled: false)
+        expect(requests.isEmpty, "SSH 关闭时不得排入远端刷新")
+        requests.enqueue(general: true, remote: true, remoteEnabled: true)
+        requests.discardRemote()
+        expect(requests.take(remoteEnabled: false) == RefreshRequest(general: true, remote: false), "关闭 SSH 应丢弃待执行远端请求但保留常规刷新")
     }
 
     private static func testRemoteHostDiscoveryAndDecoding() throws {
@@ -168,6 +209,23 @@ enum CodexAnalyticsTests {
             ],
             [
                 "timestamp": "2033-05-13T10:01:04Z",
+                "type": "token_usage_record",
+                "payload": ["turn_id": "remote-turn", "turn_token_usage": ["total_tokens": 100_000]]
+            ],
+            [
+                "timestamp": "2033-05-13T10:01:05Z",
+                "type": "event_msg",
+                "payload": [
+                    "type": "token_count",
+                    "info": [
+                        "model_context_window": 200_000,
+                        "last_token_usage": ["total_tokens": 100_000],
+                        "total_token_usage": ["total_tokens": 35_100_000]
+                    ]
+                ]
+            ],
+            [
+                "timestamp": "2033-05-13T10:01:06Z",
                 "type": "event_msg",
                 "payload": ["type": "task_complete", "turn_id": "remote-turn"]
             ],
@@ -184,7 +242,7 @@ enum CodexAnalyticsTests {
                     "info": [
                         "model_context_window": 200_000,
                         "last_token_usage": ["total_tokens": 30_000],
-                        "total_token_usage": ["total_tokens": 40_000]
+                        "total_token_usage": ["total_tokens": 35_140_000]
                     ]
                 ]
             ]
@@ -232,6 +290,48 @@ enum CodexAnalyticsTests {
         expect(remoteContext?["currentTurnActive"] as? Bool == true, "远端当前回答应保留实时状态")
     }
 
+    private static func testCachedRemoteComposition() throws {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-meter-remote-cache-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+
+        let host = RemoteCodexHost(id: "remote-cache", displayName: "Build Box", destination: "build-box", port: nil, identity: nil)
+        let snapshot = RemoteSessionSnapshot(
+            host: host,
+            dailyTokens: ["2033-05-13": 42],
+            conversations: [[
+                "turnId": "remote-turn",
+                "threadId": "remote-thread",
+                "startedAt": "2033-05-13T10:00:00Z",
+                "date": "2033-05-13",
+                "projectPath": "/srv/project",
+                "preview": "远端缓存任务",
+                "tokens": 42
+            ]],
+            projectDailyTokens: [["date": "2033-05-13", "projectPath": "/srv/project", "tokens": 42]],
+            contextHealth: []
+        )
+        let now = ISO8601DateFormatter().date(from: "2033-05-13T12:00:00Z")!
+        let service = CodexUsageService()
+        service.setRemoteSnapshotsForTesting([snapshot])
+
+        let first = service.localPayloadWithCachedRemoteForTesting(sessionsDirectory: temporary, now: now)
+        let second = service.localPayloadWithCachedRemoteForTesting(sessionsDirectory: temporary, now: now)
+        let firstToday = first["today"] as? [String: Any]
+        let secondToday = second["today"] as? [String: Any]
+        expect((firstToday?["tokens"] as? NSNumber)?.intValue == 42, "首次组合应包含缓存的 SSH Token")
+        expect((secondToday?["tokens"] as? NSNumber)?.intValue == 42, "常规重组不得丢失缓存的 SSH Token")
+        expect((secondToday?["questions"] as? NSNumber)?.intValue == 1, "常规重组应保留缓存的 SSH 对话")
+
+        service.clearRemoteSnapshotsForTesting()
+        let localOnly = service.localPayloadWithCachedRemoteForTesting(sessionsDirectory: temporary, now: now)
+        let localToday = localOnly["today"] as? [String: Any]
+        expect((localToday?["tokens"] as? NSNumber)?.intValue == 0, "关闭 SSH 后应清除远端 Token 缓存")
+        expect((localToday?["questions"] as? NSNumber)?.intValue == 0, "关闭 SSH 后应清除远端对话缓存")
+        service.shutdown()
+    }
+
     private static func testContextHealthAggregation() throws {
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-meter-context-health-tests-\(UUID().uuidString)", isDirectory: true)
@@ -249,9 +349,10 @@ enum CodexAnalyticsTests {
             "{\"timestamp\":\"2033-05-13T10:03:00Z\",\"type\":\"compacted\",\"payload\":{\"window_id\":\"window-2\",\"window_number\":2}}",
             "{\"timestamp\":\"2033-05-13T10:04:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":100000,\"last_token_usage\":{\"total_tokens\":25000},\"total_token_usage\":{\"total_tokens\":90000}}}}",
             "{\"timestamp\":\"2033-05-13T10:04:01Z\",\"type\":\"token_usage_record\",\"payload\":{\"turn_id\":\"turn-health\",\"turn_token_usage\":{\"total_tokens\":90000}}}",
+            "{\"timestamp\":\"2033-05-13T10:04:01.500Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":100000,\"last_token_usage\":{\"total_tokens\":90000},\"total_token_usage\":{\"total_tokens\":35090000}}}}",
             "{\"timestamp\":\"2033-05-13T10:04:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-health\"}}",
             "{\"timestamp\":\"2033-05-13T10:05:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-next\"}}",
-            "{\"timestamp\":\"2033-05-13T10:06:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":100000,\"last_token_usage\":{\"total_tokens\":30000},\"total_token_usage\":{\"total_tokens\":40000}}}}"
+            "{\"timestamp\":\"2033-05-13T10:06:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":100000,\"last_token_usage\":{\"total_tokens\":30000},\"total_token_usage\":{\"total_tokens\":35130000}}}}"
         ]
         let internalLines = [
             "{\"timestamp\":\"2033-05-13T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-internal-health\",\"cwd\":\"\(project.path)\",\"source\":{\"subagent\":{\"name\":\"helper\"}}}}",
@@ -294,19 +395,20 @@ enum CodexAnalyticsTests {
         let lines = [
             "{\"timestamp\":\"2033-05-13T10:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-a\"}}",
             "{\"timestamp\":\"2033-05-13T10:01:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":200000,\"last_token_usage\":{\"total_tokens\":75000},\"total_token_usage\":{\"total_tokens\":95000}}}}",
-            "{\"timestamp\":\"2033-05-13T10:01:01Z\",\"type\":\"token_usage_record\",\"payload\":{\"turn_id\":\"turn-a\",\"turn_token_usage\":{\"total_tokens\":95000}}}"
+            "{\"timestamp\":\"2033-05-13T10:01:01Z\",\"type\":\"token_usage_record\",\"payload\":{\"turn_id\":\"turn-a\",\"turn_token_usage\":{\"total_tokens\":95000}}}",
+            "{\"timestamp\":\"2033-05-13T10:01:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":200000,\"last_token_usage\":{\"total_tokens\":95000},\"total_token_usage\":{\"total_tokens\":35095000}}}}"
         ]
         try lines.joined(separator: "\n").write(to: file, atomically: true, encoding: .utf8)
 
         let service = CodexUsageService()
         let first = service.contextMeasurementForTesting(file: file)
-        expect((first?["usedTokens"] as? NSNumber)?.intValue == 75_000, "实时上下文应读取日志尾部的最新窗口用量")
+        expect((first?["usedTokens"] as? NSNumber)?.intValue == 95_000, "实时上下文应读取日志尾部的最新窗口用量")
         expect((first?["maxTokens"] as? NSNumber)?.intValue == 200_000, "实时上下文应读取模型窗口上限")
         expect((first?["conversationTokens"] as? NSNumber)?.intValue == 95_000, "实时读取应同时返回当前对话累计 Token")
         expect((first?["currentTurnTokens"] as? NSNumber)?.intValue == 95_000, "实时读取应返回本轮回答累计 Token")
         expect(first?["currentTurnActive"] as? Bool == true, "回答进行中应标记为实时")
 
-        let appended = "\n{\"timestamp\":\"2033-05-13T10:01:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-a\"}}\n{\"timestamp\":\"2033-05-13T10:01:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-b\"}}\n{\"timestamp\":\"2033-05-13T10:02:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":200000,\"last_token_usage\":{\"total_tokens\":20000},\"total_token_usage\":{\"total_tokens\":25000}}}}"
+        let appended = "\n{\"timestamp\":\"2033-05-13T10:01:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-a\"}}\n{\"timestamp\":\"2033-05-13T10:01:04Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-b\"}}\n{\"timestamp\":\"2033-05-13T10:02:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":200000,\"last_token_usage\":{\"total_tokens\":20000},\"total_token_usage\":{\"total_tokens\":35120000}}}}"
         let handle = try FileHandle(forWritingTo: file)
         try handle.seekToEnd()
         try handle.write(contentsOf: Data(appended.utf8))

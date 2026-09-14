@@ -6,7 +6,10 @@ Windows 已完成与 macOS 的 P0/P1 功能对齐：90 天用量洞察、项目/
 
 ## 后续待开发（更新于 2026-09-14）
 
-- [ ] 接入“本轮回答 / 当前对话 Tokens”：优先从 `token_usage_record.turn_token_usage.total_tokens` 读取本轮累计，旧日志回退 `token_count.info.total_token_usage.total_tokens`；按任务内各 `turnId` 的最新值求和得到本对话累计。在约 2 秒实时回调和完整快照中输出 `conversationTokens`、`currentTurnId`、`currentTurnTokens`、`currentTurnActive`，并启用 `capabilities.currentConversationTokens`。共享 UI 与数字动画已完成；启用前 Windows 继续显示原上下文健康度圆盘。
+- [ ] 接入“本轮回答 / 当前对话 Tokens”：优先从 `token_usage_record.turn_token_usage.total_tokens` 读取本轮累计；一旦某轮出现该权威记录，后续整段累计不得覆盖它。仅有旧格式时，以 `task_started` 时的 `token_count.info.total_token_usage.total_tokens` 为基线计算本轮增量；按任务内各 `turnId` 的最新值求和得到本对话累计。在约 2 秒实时回调和完整快照中输出 `conversationTokens`、`currentTurnId`、`currentTurnTokens`、`currentTurnActive`，并启用 `capabilities.currentConversationTokens`。启用后首页使用“5 小时 / 每周”双圆环及下方全宽本轮卡片；启用前 Windows 继续显示原上下文健康度圆盘与每周进度条。
+- [ ] 接入三组刷新频率设置：通过 `getRefreshSettings`、`setRefreshSettings` 与 `window.codexRefreshSettingsResult` 提供实时回答 `1/2/5/10` 秒、常规数据 `15/30/60/120` 秒、SSH `30/60/120/300` 秒白名单档位，并启用 `capabilities.refreshSettings`。设置页使用每次打开默认收起的列表项，收起时概括当前三个档位；账户结果与 SSH 快照应独立缓存、到期请求应合并。SSH 关闭时禁用其档位，30 秒档显示网络、耗电与远端负载提醒。Windows 接入前不声明能力，共享设置页不显示该区域。
+- [ ] 对齐数字展示与动画：本轮、本对话、今日 Tokens、今日对话统一从屏幕当前值衔接至新目标，普通更新约 650ms、首次载入约 850ms；新轮次和日期切换先淡出归零，向下修正平滑递减。页面隐藏、宿主暂停或 reduced-motion 时立即落到最终整数并取消动画帧。数字使用等宽样式，大数按容器宽度自动缩小字号及水平微调，不得显示省略号；无障碍标签只播报目标值。
+- [ ] 在 WebView2 文档创建阶段注入 Windows 已实现的静态能力，再加载共享组件；只有实时 Token 与刷新设置均接入后才预置 `contextHealth/currentConversationTokens/refreshSettings`。这样空数据首屏会直接显示“5 小时 / 每周”双圆环和“本轮回答 · 等待”卡片，不会先出现旧布局；未完成前不得提前声明能力。
 - [ ] 在 Windows 设置页加入“监控 SSH 对话”开关、刷新延时提示和首次发现连接时的引导；默认关闭。
 - [ ] 识别由 Windows 版 Codex 建立且当前仍有效的 OpenSSH 连接，按实际远端地址去重，断开后及时更新连接数量。
 - [ ] 仅在开关开启时读取当前已连接服务器的 Codex 会话；保存但未连接的服务器不得参与刷新或产生连接超时。
@@ -55,6 +58,10 @@ Windows 已完成与 macOS 的 P0/P1 功能对齐：90 天用量洞察、项目/
 - 验证 7/30/90 天图表的即时详情提示；7 天柱状图及 30/90 天热力图必须在 360×560 面板中完整显示，趋势视图不依赖纵向滚动。
 - 验证多个非 Git `cwd` 合并到“非项目中对话”，项目行使用左侧名称、右侧 Token 的布局，刷新中间态不会造成 Token 或周报任务跳变。
 - 覆盖上下文占用边界、缺少模型上限、子代理排除、压缩后窗口切换、当前对话切换、日志增长后的 2 秒级增量更新、同一任务取最新快照和刷新期间稳定性；未声明 `capabilities.contextHealth` 时不得显示入口。
+- 覆盖同一轮中 `turn_token_usage` 后紧跟数千万级 `total_token_usage` 的真实事件顺序，确保权威单轮值不被覆盖；覆盖纯旧格式多轮基线、任务完成、新轮归零、文件半行、追加、截断、替换，以及完整扫描和增量读取结果一致。
+- 覆盖三组刷新计时器的默认值、白名单持久化、修改后立即刷新、同时到期合并、手动刷新、SSH 开关与失败缓存；常规刷新不得清空 SSH 快照，SSH 刷新不得额外请求账户额度，远端失败不得阻塞本机更新。
+- 覆盖刷新频率列表默认收起、展开/收起、档位摘要、ARIA 状态、SSH 禁用和 30 秒警告；覆盖四组动画数字的中途改目标、日期/轮次重置、极大数适配、后台暂停和 reduced-motion。
 - 验证上下文圆盘的健康、注意、紧张、危险及无数据状态，并确认 360px 面板双列无溢出、旧宿主单列不留空位。
+- 启用 `currentConversationTokens` 后验证 360px 首页首行双圆环等高、每周额度不再显示进度条、本轮卡片全宽、长任务名截断、浅色/深色及空数据首屏；能力未启用时验证 Windows 旧布局完全不变。
 - 在 Windows 10 22H2 和 Windows 11 上验证 WebView2、动态 DPI、托盘重建、锁屏/休眠恢复、浅色/深色以及安装/卸载升级。
 - [x] `capabilities.extendedInsights/contextHealth/notifications/menuBar/reportExport` 全部置为 `true`；旧宿主未声明能力时继续保持兼容布局。

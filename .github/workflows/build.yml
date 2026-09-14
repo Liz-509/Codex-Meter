@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 env:
-  MACOS_RELEASE_VERSION: "1.4.5"
+  MACOS_RELEASE_VERSION: "1.4.6"
   WINDOWS_RELEASE_VERSION: "1.4.2"
 
 jobs:
@@ -184,4 +184,4 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             "release-artifacts/Codex-Meter-macOS-arm64-v${MACOS_RELEASE_VERSION}.dmg" \
             --title "Codex Meter ${GITHUB_REF_NAME}" \
-            --notes "新增当前回答与当前对话 Token 实时统计：主卡片约每 2 秒显示本轮回答消耗，并按任务内各轮最终值计算本对话累计；上下文压缩不会重置累计值。今日 Tokens、今日对话、本轮与本对话数字均加入平滑增减动画，并支持减少动态效果。macOS 实时读取改为首次顺序扫描、后续按文件偏移增量解析。本版本仅发布 macOS 安装包，Windows 对应能力仍在开发中。"
+            --notes "增强 macOS 实时 Token 指标：修复单轮累计与整段累计交替覆盖导致的数值跳变，旧格式日志改为按轮次基线计算；本轮、本对话、今日 Tokens 与今日对话使用平滑数字动画，大数自动缩放完整显示。首页调整为 5 小时与每周额度双圆环，本轮回答改为下方全宽卡片，空数据启动时也保持新布局。设置新增可折叠的实时、常规与 SSH 刷新频率档位，并限制 SSH 最快为 30 秒。本版本仅发布 macOS 安装包，Windows 对应能力仍在开发中。"

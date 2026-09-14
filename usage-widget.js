@@ -114,6 +114,16 @@ const hostBridge = {
   dismissRemoteSessionPrompt() {
     window.codexMeterBridge?.dismissRemoteSessionPrompt?.();
   },
+  getRefreshSettings() {
+    if (!window.codexMeterBridge?.getRefreshSettings) return false;
+    window.codexMeterBridge.getRefreshSettings();
+    return true;
+  },
+  setRefreshSettings(payload) {
+    if (!window.codexMeterBridge?.setRefreshSettings) return false;
+    window.codexMeterBridge.setRefreshSettings(payload);
+    return true;
+  },
   openNotificationSettings() {
     window.codexMeterBridge?.openNotificationSettings?.();
   },
@@ -132,6 +142,9 @@ class CodexUsageWidget extends HTMLElement {
     super();
     this.attachShadow({ mode: "open" });
     this.data = structuredClone(DEFAULT_DATA);
+    if (window.codexMeterInitialCapabilities && typeof window.codexMeterInitialCapabilities === "object") {
+      this.data.capabilities = { ...this.data.capabilities, ...window.codexMeterInitialCapabilities };
+    }
     this.autoHover = this.hasAttribute("native");
     this.pinned = this.autoHover && localStorage.getItem("codex-widget-pinned") === "true";
     this.collapsed = this.autoHover ? !this.pinned : localStorage.getItem("codex-widget-collapsed") === "true";
@@ -173,6 +186,16 @@ class CodexUsageWidget extends HTMLElement {
       connectedHosts: 0,
       promptNeeded: false,
     };
+    this.refreshSettings = {
+      supported: false,
+      liveSeconds: 2,
+      generalSeconds: 30,
+      sshSeconds: 60,
+      liveOptions: [1, 2, 5, 10],
+      generalOptions: [15, 30, 60, 120],
+      sshOptions: [30, 60, 120, 300],
+    };
+    this.refreshSettingsExpanded = false;
     this.exportMessage = "";
     this.pointerInside = false;
     this.resetting = false;
@@ -283,8 +306,10 @@ class CodexUsageWidget extends HTMLElement {
     cancelAnimationFrame(this.quotaAnimationFrame);
     this.quotaAnimationFrame = null;
     const ring = this.shadowRoot.querySelector(".primary-ring");
+    const secondaryRing = this.shadowRoot.querySelector(".secondary-ring");
     const fill = this.shadowRoot.querySelector(".secondary-fill");
     ring?.style.setProperty("--value", this.data.primary.remainingPercent ?? 0);
+    secondaryRing?.style.setProperty("--value", this.data.secondary.remainingPercent ?? 0);
     if (fill) fill.style.width = `${this.data.secondary.remainingPercent ?? 0}%`;
   }
 
@@ -481,7 +506,60 @@ class CodexUsageWidget extends HTMLElement {
     return Number.isFinite(number) ? Math.max(0, number) : null;
   }
 
-  animateNumber(key, element, targetValue, formatter = (value) => this.formatNumber(value), identity = key) {
+  numberFitResult(naturalWidth, availableWidth, maximumSize, hardMinimumSize) {
+    if (!(naturalWidth > 0) || !(availableWidth > 0)) return { fontSize: maximumSize, scale: 1 };
+    const desiredSize = maximumSize * availableWidth / naturalWidth;
+    const fontSize = clamp(desiredSize, hardMinimumSize, maximumSize);
+    const widthAtSize = naturalWidth * fontSize / maximumSize;
+    return {
+      fontSize,
+      scale: Math.min(1, availableWidth / widthAtSize),
+    };
+  }
+
+  fitNumberText(element, texts, options = {}) {
+    if (!element?.style || typeof document.createElement !== "function" || typeof getComputedStyle !== "function") return;
+    const maximumSize = Number(options.max) || 18;
+    const hardMinimumSize = Number(options.hardMin) || 9;
+    const parent = element.parentElement;
+    if (!parent) return;
+    const parentStyle = getComputedStyle(parent);
+    const horizontalPadding = (parseFloat(parentStyle.paddingLeft) || 0) + (parseFloat(parentStyle.paddingRight) || 0);
+    let availableWidth = Math.max(0, parent.clientWidth - horizontalPadding);
+    if (options.mode === "row") {
+      const siblings = [...parent.children].filter((child) => child !== element);
+      const siblingWidth = siblings.reduce((sum, sibling) => sum + sibling.getBoundingClientRect().width, 0);
+      const gap = parseFloat(parentStyle.columnGap || parentStyle.gap) || 0;
+      availableWidth = Math.max(0, availableWidth - siblingWidth - gap * siblings.length);
+    }
+    if (!(availableWidth > 0)) return;
+
+    const computed = getComputedStyle(element);
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext?.("2d");
+    if (!context) return;
+    context.font = `${computed.fontStyle || "normal"} ${computed.fontWeight || "400"} ${maximumSize}px ${computed.fontFamily || "sans-serif"}`;
+    const values = texts.map(String);
+    const naturalWidth = Math.max(...values.map((text) => {
+      const spacing = (parseFloat(computed.letterSpacing) || 0) * Math.max(0, text.length - 1);
+      return context.measureText(text).width + spacing;
+    }));
+    const result = this.numberFitResult(naturalWidth, availableWidth, maximumSize, hardMinimumSize);
+    element.style.setProperty("--fit-number-size", `${result.fontSize.toFixed(2)}px`);
+    element.style.setProperty("--fit-number-scale", result.scale.toFixed(4));
+  }
+
+  refitNumbers() {
+    for (const animation of this.numberAnimations.values()) {
+      if (!animation.fitOptions) continue;
+      this.fitNumberText(animation.element, [
+        animation.formatter(Math.round(animation.current)),
+        animation.formatter(Math.round(animation.target)),
+      ], animation.fitOptions);
+    }
+  }
+
+  animateNumber(key, element, targetValue, formatter = (value) => this.formatNumber(value), identity = key, fitOptions = null) {
     if (!element) return;
     const target = this.numericValue(targetValue);
     const previous = this.numberAnimations.get(key);
@@ -497,6 +575,9 @@ class CodexUsageWidget extends HTMLElement {
     const identityChanged = previous != null && previous.identity !== identity;
     const startValue = identityChanged ? 0 : previous?.current ?? 0;
     if (previous?.frame != null) cancelAnimationFrame(previous.frame);
+    if (fitOptions) {
+      this.fitNumberText(element, [formatter(Math.round(startValue)), formatter(Math.round(target))], fitOptions);
+    }
 
     if (identityChanged) {
       element.classList.remove("counter-reset");
@@ -505,11 +586,11 @@ class CodexUsageWidget extends HTMLElement {
     }
     if (shouldSnap || startValue === target) {
       element.textContent = formatter(Math.round(target));
-      this.numberAnimations.set(key, { current: target, target, identity, frame: null, element, formatter });
+      this.numberAnimations.set(key, { current: target, target, identity, frame: null, element, formatter, fitOptions });
       return;
     }
 
-    const animation = { current: startValue, target, identity, frame: null, element, formatter };
+    const animation = { current: startValue, target, identity, frame: null, element, formatter, fitOptions };
     const duration = previous == null ? 850 : 650;
     let startedAt = null;
     const draw = (now) => {
@@ -574,6 +655,7 @@ class CodexUsageWidget extends HTMLElement {
     const button = this.shadowRoot.querySelector("[data-action='theme']");
     if (label) label.textContent = { auto: "跟随系统", light: "浅色", dark: "深色" }[this.theme];
     if (button) button.innerHTML = this.theme === "dark" ? ICONS.sun : ICONS.moon;
+    requestAnimationFrame(() => this.refitNumbers());
   }
 
   bindEvents() {
@@ -584,6 +666,7 @@ class CodexUsageWidget extends HTMLElement {
         this.openDialog("settings");
         this.requestLaunchAtLoginState();
         this.requestRemoteSessionSettings();
+        this.requestRefreshSettings();
         this.requestNotificationSettings();
       }
       if (action === "refresh") this.refresh();
@@ -636,6 +719,24 @@ class CodexUsageWidget extends HTMLElement {
       }
       if (action === "toggle-remote-session-monitoring") {
         hostBridge.setRemoteSessionMonitoring(!this.remoteSessionSettings.enabled);
+      }
+      if (action === "set-refresh-interval") {
+        const button = event.target.closest("[data-refresh-kind]");
+        const kind = button?.dataset.refreshKind;
+        const seconds = Number(button?.dataset.refreshSeconds);
+        if (["live", "general", "ssh"].includes(kind) && Number.isFinite(seconds)) {
+          const next = {
+            liveSeconds: Number(this.refreshSettings.liveSeconds),
+            generalSeconds: Number(this.refreshSettings.generalSeconds),
+            sshSeconds: Number(this.refreshSettings.sshSeconds),
+            [`${kind}Seconds`]: seconds,
+          };
+          hostBridge.setRefreshSettings(next);
+        }
+      }
+      if (action === "toggle-refresh-settings") {
+        this.refreshSettingsExpanded = !this.refreshSettingsExpanded;
+        this.renderRefreshSettings();
       }
       if (action === "open-notification-settings") hostBridge.openNotificationSettings();
       if (action === "toggle-notifications") {
@@ -813,6 +914,75 @@ class CodexUsageWidget extends HTMLElement {
     }
   }
 
+  requestRefreshSettings() {
+    if (!hostBridge.getRefreshSettings()) {
+      this.refreshSettings.supported = false;
+      this.renderRefreshSettings();
+    }
+  }
+
+  handleRefreshSettings(payload = {}) {
+    this.refreshSettings = {
+      ...this.refreshSettings,
+      ...payload,
+      liveOptions: Array.isArray(payload.liveOptions) ? payload.liveOptions : this.refreshSettings.liveOptions,
+      generalOptions: Array.isArray(payload.generalOptions) ? payload.generalOptions : this.refreshSettings.generalOptions,
+      sshOptions: Array.isArray(payload.sshOptions) ? payload.sshOptions : this.refreshSettings.sshOptions,
+    };
+    this.data.capabilities = {
+      ...this.data.capabilities,
+      refreshSettings: payload.supported === true,
+    };
+    this.renderRefreshSettings();
+  }
+
+  refreshIntervalLabel(seconds) {
+    return seconds >= 60 ? `${seconds / 60} 分钟` : `${seconds} 秒`;
+  }
+
+  renderRefreshSettings() {
+    const container = this.shadowRoot.querySelector(".refresh-settings");
+    if (!container) return;
+    const supported = this.refreshSettings.supported || this.data.capabilities?.refreshSettings === true;
+    const group = this.shadowRoot.querySelector(".refresh-settings-group");
+    if (group) group.hidden = !supported;
+    if (!supported) {
+      container.innerHTML = "";
+      return;
+    }
+    const toggle = this.shadowRoot.querySelector(".refresh-settings-toggle");
+    const summary = this.shadowRoot.querySelector(".refresh-settings-summary");
+    const summaryText = `实时 ${this.refreshIntervalLabel(this.refreshSettings.liveSeconds)} · 常规 ${this.refreshIntervalLabel(this.refreshSettings.generalSeconds)} · SSH ${this.refreshIntervalLabel(this.refreshSettings.sshSeconds)}`;
+    if (summary) summary.textContent = summaryText;
+    if (toggle) {
+      toggle.setAttribute("aria-expanded", String(this.refreshSettingsExpanded));
+      toggle.classList.toggle("is-expanded", this.refreshSettingsExpanded);
+    }
+    container.hidden = !this.refreshSettingsExpanded;
+    const remoteEnabled = Object.hasOwn(this.data.capabilities || {}, "remoteSessionMonitoringEnabled")
+      ? this.data.capabilities.remoteSessionMonitoringEnabled === true
+      : this.remoteSessionSettings.enabled === true;
+    const optionButtons = (kind, options, selected, disabled = false) => options.map((seconds) => `
+      <button class="refresh-option ${Number(selected) === Number(seconds) ? "is-active" : ""}" data-action="set-refresh-interval" data-refresh-kind="${kind}" data-refresh-seconds="${seconds}" type="button" ${disabled ? "disabled" : ""}>${this.refreshIntervalLabel(seconds)}</button>
+    `).join("");
+    const sshFast = Number(this.refreshSettings.sshSeconds) === 30;
+    container.innerHTML = `
+      <div class="refresh-setting-card">
+        <div class="refresh-setting-copy"><strong>实时回答</strong><span>本轮、本对话与当前上下文</span></div>
+        <div class="refresh-options">${optionButtons("live", this.refreshSettings.liveOptions, this.refreshSettings.liveSeconds)}</div>
+      </div>
+      <div class="refresh-setting-card">
+        <div class="refresh-setting-copy"><strong>常规数据</strong><span>账户额度、今日用量、历史与洞察</span></div>
+        <div class="refresh-options">${optionButtons("general", this.refreshSettings.generalOptions, this.refreshSettings.generalSeconds)}</div>
+      </div>
+      <div class="refresh-setting-card ${remoteEnabled ? "" : "is-disabled"}">
+        <div class="refresh-setting-copy"><strong>SSH 数据</strong><span>${remoteEnabled ? "远端对话、Token 与上下文" : "开启 SSH 对话监控后生效"}</span></div>
+        <div class="refresh-options">${optionButtons("ssh", this.refreshSettings.sshOptions, this.refreshSettings.sshSeconds, !remoteEnabled)}</div>
+        ${remoteEnabled && sshFast ? '<span class="refresh-warning">高频 SSH 刷新会增加网络、耗电和远端主机负载</span>' : ""}
+      </div>
+    `;
+  }
+
   handleRemoteSessionSettings(payload = {}) {
     this.remoteSessionSettings = {
       ...this.remoteSessionSettings,
@@ -826,6 +996,7 @@ class CodexUsageWidget extends HTMLElement {
       remoteSessionPromptNeeded: payload.promptNeeded === true,
     };
     this.renderRemoteSessionSettings();
+    this.renderRefreshSettings();
     this.renderRemoteSessionPrompt();
   }
 
@@ -938,6 +1109,10 @@ class CodexUsageWidget extends HTMLElement {
       this.renderConversations();
     }
     if (kind === "context-health") this.renderContextHealth();
+    if (kind === "settings") {
+      this.refreshSettingsExpanded = false;
+      this.renderRefreshSettings();
+    }
     const dialog = this.shadowRoot.querySelector(`[data-dialog='${kind}']`);
     dialog?.removeAttribute("hidden");
     requestAnimationFrame(() => dialog?.querySelector(focusSelector)?.focus());
@@ -1241,6 +1416,8 @@ class CodexUsageWidget extends HTMLElement {
   renderContextHealthSummary() {
     const card = this.shadowRoot.querySelector(".context-health-summary");
     if (!card) return;
+    const tokenMode = Boolean(this.data.capabilities?.currentConversationTokens);
+    this.shadowRoot.querySelector(".quota-overview")?.classList.toggle("has-live-token-card", tokenMode);
     const state = this.contextHealthSummaryState();
     card.toggleAttribute("hidden", !state.supported);
     if (!state.supported) return;
@@ -1252,10 +1429,9 @@ class CodexUsageWidget extends HTMLElement {
     const conversation = card.querySelector(".conversation-token-summary");
     const turnValue = card.querySelector(".current-turn-token-value");
     const conversationValue = card.querySelector(".current-conversation-token-value");
-    const conversationContext = card.querySelector(".current-conversation-context");
+    const conversationContext = card.querySelector(".current-conversation-context-value");
     const conversationTrack = card.querySelector(".current-conversation-track i");
     const liveBadge = card.querySelector(".live-badge");
-    const tokenMode = Boolean(this.data.capabilities?.currentConversationTokens);
     card.classList.remove("is-empty", "is-attention", "is-high", "is-critical");
     card.classList.toggle("is-empty", !state.available);
     card.classList.toggle("is-conversation-token", tokenMode);
@@ -1269,13 +1445,13 @@ class CodexUsageWidget extends HTMLElement {
     if (legacy) legacy.hidden = tokenMode;
     if (conversation) conversation.hidden = !tokenMode;
     if (tokenMode) {
-      this.animateNumber("current-turn-tokens", turnValue, state.currentTurnTokens, (value) => this.formatNumber(value), state.currentTurnId || "no-turn");
-      this.animateNumber("current-conversation-tokens", conversationValue, state.conversationTokens, (value) => this.formatNumber(value), state.taskId || "no-task");
-      if (conversationContext) conversationContext.textContent = state.available ? `上下文剩余 ${Math.round(state.remaining)}%` : "等待对话用量";
+      this.animateNumber("current-turn-tokens", turnValue, state.currentTurnTokens, (value) => this.formatNumber(value), state.currentTurnId || "no-turn", { max: 25, min: 14, hardMin: 10, mode: "row" });
+      this.animateNumber("current-conversation-tokens", conversationValue, state.conversationTokens, (value) => this.formatNumber(value), state.taskId || "no-task", { max: 11, min: 9, hardMin: 8, mode: "row" });
+      if (conversationContext) conversationContext.textContent = state.available ? `${Math.round(state.remaining)}%` : "—";
       if (conversationTrack) conversationTrack.style.width = `${state.available ? state.used : 0}%`;
       if (liveBadge) {
         liveBadge.classList.toggle("is-complete", !state.currentTurnActive);
-        liveBadge.innerHTML = state.currentTurnActive ? "<i></i>实时" : "已完成";
+        liveBadge.innerHTML = !state.available ? "等待" : state.currentTurnActive ? "<i></i>实时" : "已完成";
       }
     }
     card.setAttribute("aria-label", tokenMode
@@ -1598,8 +1774,9 @@ class CodexUsageWidget extends HTMLElement {
   animateQuotaFill() {
     cancelAnimationFrame(this.quotaAnimationFrame);
     const ring = this.shadowRoot.querySelector(".primary-ring");
+    const secondaryRing = this.shadowRoot.querySelector(".secondary-ring");
     const fill = this.shadowRoot.querySelector(".secondary-fill");
-    if (!ring || !fill) return;
+    if (!ring || (!secondaryRing && !fill)) return;
 
     const primaryTarget = this.data.primary.remainingPercent ?? 0;
     const secondaryTarget = this.data.secondary.remainingPercent ?? 0;
@@ -1614,14 +1791,16 @@ class CodexUsageWidget extends HTMLElement {
       const primaryProgress = Math.min(1, (now - startedAt) / 720);
       const secondaryProgress = Math.min(1, Math.max(0, now - startedAt - 90) / 650);
       ring.style.setProperty("--value", primaryTarget * easeOut(primaryProgress));
-      fill.style.width = `${secondaryTarget * easeOut(secondaryProgress)}%`;
+      secondaryRing?.style.setProperty("--value", secondaryTarget * easeOut(secondaryProgress));
+      if (fill) fill.style.width = `${secondaryTarget * easeOut(secondaryProgress)}%`;
       if (primaryProgress < 1 || secondaryProgress < 1) {
         this.quotaAnimationFrame = requestAnimationFrame(draw);
       }
     };
 
     ring.style.setProperty("--value", 0);
-    fill.style.width = "0%";
+    secondaryRing?.style.setProperty("--value", 0);
+    if (fill) fill.style.width = "0%";
     this.quotaAnimationFrame = requestAnimationFrame(draw);
   }
 
@@ -1674,23 +1853,30 @@ class CodexUsageWidget extends HTMLElement {
     const p = this.data.primary.remainingPercent;
     const s = this.data.secondary.remainingPercent;
     const primaryRing = this.shadowRoot.querySelector(".primary-ring");
+    const secondaryRing = this.shadowRoot.querySelector(".secondary-ring");
     const secondaryFill = this.shadowRoot.querySelector(".secondary-fill");
     const brandIcon = this.shadowRoot.querySelector(".brand-icon");
     primaryRing?.style.setProperty("--value", p ?? 0);
+    secondaryRing?.style.setProperty("--value", s ?? 0);
     brandIcon?.style.setProperty("--liquid-level", clamp(p ?? 0, 0, 100));
     this.applyQuotaTone(primaryRing, p);
     this.applyQuotaTone(brandIcon, p);
+    this.applyQuotaTone(secondaryRing, s);
     this.applyQuotaTone(secondaryFill, s);
     this.shadowRoot.querySelector(".primary-value").textContent = this.formatPercent(p);
     this.shadowRoot.querySelector(".primary-reset").textContent = this.formatReset(this.data.primary.resetsAt);
     this.shadowRoot.querySelector(".health").textContent = p == null ? "正在同步" : p < 10 ? "额度告警" : p < 20 ? "额度偏低" : "状态良好";
-    this.shadowRoot.querySelector(".secondary-value").textContent = this.formatPercent(s);
-    secondaryFill.style.width = `${s ?? 0}%`;
-    this.shadowRoot.querySelector(".secondary-reset").textContent = this.formatReset(this.data.secondary.resetsAt);
-    this.shadowRoot.querySelector(".reset-count").textContent = this.formatNumber(this.data.resetCredits);
+    this.shadowRoot.querySelectorAll(".secondary-value").forEach((element) => { element.textContent = this.formatPercent(s); });
+    if (secondaryFill) secondaryFill.style.width = `${s ?? 0}%`;
+    this.shadowRoot.querySelectorAll(".secondary-reset").forEach((element) => { element.textContent = this.formatReset(this.data.secondary.resetsAt); });
+    const secondaryHealth = this.shadowRoot.querySelector(".secondary-health");
+    if (secondaryHealth) secondaryHealth.textContent = s == null ? "正在同步" : s < 10 ? "额度告警" : s < 20 ? "额度偏低" : "状态良好";
+    const resetCount = this.shadowRoot.querySelector(".reset-count");
+    resetCount.textContent = this.formatNumber(this.data.resetCredits);
+    this.fitNumberText(resetCount, [resetCount.textContent], { max: 18, min: 12, hardMin: 9, mode: "block" });
     const todayIdentity = this.localDateKey();
-    this.animateNumber("today-tokens", this.shadowRoot.querySelector(".token-count"), this.data.todayTokens, (value) => this.formatNumber(value), todayIdentity);
-    this.animateNumber("today-questions", this.shadowRoot.querySelector(".question-count"), this.data.todayQuestions, (value) => this.formatNumber(value), todayIdentity);
+    this.animateNumber("today-tokens", this.shadowRoot.querySelector(".token-count"), this.data.todayTokens, (value) => this.formatNumber(value), todayIdentity, { max: 18, min: 12, hardMin: 9, mode: "block" });
+    this.animateNumber("today-questions", this.shadowRoot.querySelector(".question-count"), this.data.todayQuestions, (value) => this.formatNumber(value), todayIdentity, { max: 18, min: 12, hardMin: 9, mode: "block" });
     this.shadowRoot.querySelector(".plan").textContent = this.data.plan;
     const updated = this.shadowRoot.querySelector(".updated");
     updated.textContent = `${this.data.syncMessage} · ${new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(this.data.updatedAt)}`;
@@ -1704,10 +1890,16 @@ class CodexUsageWidget extends HTMLElement {
     this.renderNotificationPrompt();
     this.renderRemoteSessionPrompt();
     this.renderRemoteSessionSettings();
-    requestAnimationFrame(() => this.syncNativeSize(false));
+    this.renderRefreshSettings();
+    requestAnimationFrame(() => {
+      this.refitNumbers();
+      this.syncNativeSize(false);
+    });
   }
 
   render() {
+    const initialTokenMode = Boolean(this.data.capabilities?.currentConversationTokens);
+    const initialContextSupported = Boolean(this.data.capabilities?.contextHealth);
     this.shadowRoot.innerHTML = `
       <style>${this.styles}</style>
       <section class="widget ${this.collapsed ? "collapsed collapsed-settled compact-motion" : ""}" aria-label="Codex Meter">
@@ -1744,7 +1936,7 @@ class CodexUsageWidget extends HTMLElement {
             <button data-action="enable-remote-session-monitoring" type="button">开启</button>
             <button data-action="dismiss-remote-session-prompt" type="button" aria-label="稍后提醒">稍后</button>
           </div>
-          <div class="quota-overview">
+          <div class="quota-overview ${initialTokenMode ? "has-live-token-card" : ""}">
             <div class="quota-hero">
               <div class="ring primary-ring" style="--value:${this.data.primary.remainingPercent ?? 0}">
                 <div class="ring-inner"><strong class="primary-value">${this.formatPercent(this.data.primary.remainingPercent)}</strong><span>剩余</span></div>
@@ -1755,17 +1947,38 @@ class CodexUsageWidget extends HTMLElement {
                 <span class="muted primary-reset">${this.formatReset(this.data.primary.resetsAt)}</span>
               </div>
             </div>
-            <button class="context-health-summary" data-action="context-health-detail" type="button" aria-haspopup="dialog" hidden>
-              <span class="legacy-context-health">
+            <div class="quota-hero secondary-quota-hero">
+              <div class="ring secondary-ring" style="--value:${this.data.secondary.remainingPercent ?? 0}">
+                <div class="ring-inner"><strong class="secondary-value">${this.formatPercent(this.data.secondary.remainingPercent)}</strong><span>剩余</span></div>
+              </div>
+              <div class="hero-copy">
+                <span class="section-label">${this.data.secondary.label}</span>
+                <strong class="secondary-health">正在同步</strong>
+                <span class="muted secondary-reset">${this.formatReset(this.data.secondary.resetsAt)}</span>
+              </div>
+            </div>
+            <button class="context-health-summary ${initialTokenMode ? "is-conversation-token is-empty" : ""}" data-action="context-health-detail" type="button" aria-haspopup="dialog" ${initialContextSupported ? "" : "hidden"}>
+              <span class="legacy-context-health" ${initialTokenMode ? "hidden" : ""}>
                 <span class="ring context-health-ring" style="--value:0" aria-hidden="true"><span class="ring-inner"><strong class="context-health-percent">—</strong><span>剩余</span></span></span>
                 <span class="context-health-copy"><small>上下文健康度</small><strong class="context-health-value">暂无数据</strong><span class="context-health-detail">等待 Codex 写入上下文用量</span></span>
               </span>
-              <span class="conversation-token-summary" hidden>
-                <span class="conversation-token-heading"><small>本轮回答</small><span class="live-badge"><i></i>实时</span></span>
-                <span class="conversation-token-value"><strong class="current-turn-token-value">—</strong><em>Tokens</em></span>
-                <span class="conversation-total-line">本对话累计 <strong class="current-conversation-token-value">—</strong> Tokens</span>
+              <span class="conversation-token-summary" ${initialTokenMode ? "" : "hidden"}>
+                <span class="conversation-token-heading"><small>本轮回答</small><span class="live-badge is-complete">等待</span></span>
+                <span class="conversation-token-body">
+                  <span class="conversation-token-value"><strong class="current-turn-token-value">—</strong><em>Tokens</em></span>
+                  <span class="conversation-token-meta">
+                    <span class="conversation-meta-block conversation-total-block">
+                      <small>本对话累计</small>
+                      <span class="conversation-meta-value"><strong class="current-conversation-token-value">—</strong><em>Tokens</em></span>
+                    </span>
+                    <span class="conversation-meta-block context-remaining-block">
+                      <small>上下文剩余</small>
+                      <strong class="current-conversation-context-value">—</strong>
+                    </span>
+                  </span>
+                </span>
                 <span class="current-conversation-track" aria-hidden="true"><i></i></span>
-                <span class="conversation-token-footer"><span class="current-conversation-context">等待对话用量</span><span class="context-health-detail">等待 Codex 写入上下文用量</span></span>
+                <span class="conversation-task-line"><i aria-hidden="true"></i><span class="context-health-detail">等待 Codex 写入上下文用量</span></span>
               </span>
             </button>
           </div>
@@ -1822,6 +2035,13 @@ class CodexUsageWidget extends HTMLElement {
                 </div>
                 <button class="setting-switch" data-action="toggle-startup" type="button" role="switch" aria-label="开机自启动" aria-checked="false"><span></span></button>
               </div>
+              <div class="refresh-settings-group" hidden>
+                <button class="setting-row refresh-settings-toggle" data-action="toggle-refresh-settings" type="button" aria-expanded="false" aria-controls="refresh-settings-options">
+                  <span class="setting-copy"><strong>刷新频率</strong><span class="refresh-settings-summary">实时 2 秒 · 常规 30 秒 · SSH 1 分钟</span></span>
+                  <span class="setting-chevron" aria-hidden="true">${ICONS.chevron}</span>
+                </button>
+                <div class="refresh-settings" id="refresh-settings-options" hidden></div>
+              </div>
               <div class="remote-session-settings"></div>
               <div class="notification-settings"></div>
             </div>
@@ -1868,7 +2088,7 @@ class CodexUsageWidget extends HTMLElement {
       header { height:66px; display:flex; align-items:center; justify-content:space-between; padding:0 16px 0 18px; border-bottom:1px solid var(--line); }
       :host([native]) header { position:relative; z-index:2; transform:translate(0,0); transform-origin:var(--expand-x) var(--expand-y); transition:transform .28s cubic-bezier(.2,.8,.2,1),border-color .2s; }
       .brand { display:flex; align-items:center; gap:10px; min-width:0; }
-      .primary-ring,.secondary-fill,.brand-icon { --quota-start:#6960e8; --quota-end:#8a87f4; --quota-glow:rgba(111,101,231,.25); }
+      .primary-ring,.secondary-ring,.secondary-fill,.brand-icon { --quota-start:#6960e8; --quota-end:#8a87f4; --quota-glow:rgba(111,101,231,.25); }
       .quota-warning { --quota-start:#d99016; --quota-end:#f0ba38; --quota-glow:rgba(224,157,28,.3); }
       .quota-critical { --quota-start:#df4655; --quota-end:#f06b61; --quota-glow:rgba(229,72,82,.32); }
       .brand-icon { --liquid-empty:rgba(92,82,210,.48); position:relative; width:30px; height:30px; display:grid; place-items:center; flex:0 0 auto; overflow:hidden; border-radius:9px; color:white; background:var(--liquid-empty); box-shadow:inset 0 1px 0 rgba(255,255,255,.35),0 5px 14px var(--quota-glow); transition:background .35s ease,box-shadow .35s ease; }
@@ -1927,6 +2147,10 @@ class CodexUsageWidget extends HTMLElement {
       .collapsed [data-action="collapse"] { transform:rotate(-90deg); }
       .quota-overview { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); align-items:stretch; gap:8px; }
       .quota-hero { min-width:0; min-height:158px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:0; overflow:hidden; padding:12px 10px 11px; border:1px solid var(--line); border-radius:18px; background:var(--panel); text-align:center; }
+      .secondary-quota-hero { display:none; }
+      .quota-overview.has-live-token-card .secondary-quota-hero { display:flex; }
+      .quota-overview.has-live-token-card .context-health-summary { grid-column:1/-1; min-height:106px; }
+      .quota-overview.has-live-token-card + .weekly { display:none; }
       .notification-prompt,.remote-session-prompt { display:grid; grid-template-columns:minmax(0,1fr) auto auto; align-items:center; gap:7px; margin-bottom:10px; padding:9px 10px; border:1px solid rgba(111,99,230,.18); border-radius:13px; background:rgba(111,99,230,.075); }
       .notification-prompt[hidden],.remote-session-prompt[hidden] { display:none; }
       .notification-prompt>div,.remote-session-prompt>div { min-width:0; display:flex; flex-direction:column; gap:2px; }
@@ -1962,7 +2186,7 @@ class CodexUsageWidget extends HTMLElement {
       .stat-icon { width:25px; height:25px; display:grid; place-items:center; margin-bottom:10px; border-radius:8px; }
       .stat-icon svg { width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
       .violet { color:#7469ea; background:rgba(116,105,234,.12); }.cyan { color:#159abc; background:rgba(21,154,188,.11); }.coral { color:#e76876; background:rgba(231,104,118,.11); }
-      .stat-value { display:block; overflow:hidden; font-size:18px; font-weight:700; font-variant-numeric:tabular-nums; letter-spacing:-.04em; text-overflow:ellipsis; }
+      .stat-value { display:block; overflow:visible; font-size:var(--fit-number-size,18px); font-weight:700; font-variant-numeric:tabular-nums; letter-spacing:-.04em; line-height:1.1; white-space:nowrap; transform:scaleX(var(--fit-number-scale,1)); transform-origin:left center; transition:font-size .16s ease,transform .16s ease; }
       .stat-label { display:block; margin-top:3px; color:var(--muted); font-size:9px; white-space:nowrap; }
       .context-health-summary { --context-start:#26a875; --context-end:#4fc993; --context-glow:rgba(44,173,122,.24); width:100%; height:auto; min-width:0; min-height:158px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:0; overflow:hidden; padding:12px 10px 11px; border:1px solid var(--line); border-radius:18px; color:var(--text); background:var(--panel); text-align:center; }
       .context-health-summary[hidden] { display:none; }
@@ -1985,20 +2209,32 @@ class CodexUsageWidget extends HTMLElement {
       .context-health-summary.is-conversation-token:hover,.context-health-summary.is-conversation-token:focus-visible { border-color:rgba(21,154,188,.3); background:radial-gradient(circle at 90% 4%,rgba(35,178,204,.17),transparent 44%),rgba(21,154,188,.055); }
       .conversation-token-summary { position:relative; z-index:1; min-width:0; height:100%; display:flex; flex-direction:column; align-items:stretch; }
       .conversation-token-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--muted); font-size:9px; font-weight:650; }
-      .live-badge { display:flex; align-items:center; gap:4px; padding:3px 6px; border-radius:7px; color:#159abc; background:rgba(21,154,188,.09); font-size:7px; font-weight:750; }
+      .live-badge { display:flex; align-items:center; gap:4px; padding:3px 6px; border-radius:7px; color:#159abc; background:rgba(21,154,188,.09); font-size:8px; font-weight:750; }
       .live-badge i { width:4px; height:4px; border-radius:50%; background:#21afc9; box-shadow:0 0 0 3px rgba(33,175,201,.12); }
       .live-badge.is-complete { color:var(--muted); background:rgba(120,126,147,.09); }
-      .conversation-token-value { min-width:0; display:flex; align-items:baseline; gap:5px; margin:10px 0 6px; }
-      .conversation-token-value strong { min-width:0; overflow:hidden; color:#159abc; font-size:25px; font-weight:750; font-variant-numeric:tabular-nums; letter-spacing:-.055em; line-height:1; text-overflow:ellipsis; white-space:nowrap; }
+      .conversation-token-body { min-width:0; display:block; }
+      .conversation-token-value { min-width:0; display:flex; align-items:baseline; gap:5px; margin:8px 0 9px; }
+      .conversation-token-value strong { min-width:0; overflow:visible; color:#159abc; font-size:var(--fit-number-size,25px); font-weight:750; font-variant-numeric:tabular-nums; letter-spacing:-.055em; line-height:1; white-space:nowrap; transform:scaleX(var(--fit-number-scale,1)); transform-origin:left center; transition:font-size .16s ease,transform .16s ease; }
       .conversation-token-value em { color:var(--muted); font-size:8px; font-style:normal; font-weight:650; }
-      .conversation-total-line { display:flex; align-items:baseline; gap:4px; margin-bottom:9px; color:var(--muted); font-size:7px; white-space:nowrap; }
-      .conversation-total-line strong { max-width:74px; overflow:hidden; color:var(--text); font-size:9px; font-variant-numeric:tabular-nums; text-overflow:ellipsis; }
-      .current-conversation-track { height:5px; overflow:hidden; border-radius:6px; background:rgba(120,126,147,.12); }
+      .conversation-token-meta { min-width:0; display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:10px; margin-bottom:7px; }
+      .conversation-meta-block { min-width:0; display:flex; flex-direction:column; gap:3px; }
+      .conversation-meta-block>small { color:var(--muted); font-size:8px; font-weight:600; line-height:1; }
+      .conversation-meta-value { min-width:0; display:flex; align-items:baseline; gap:3px; }
+      .conversation-meta-value strong { min-width:0; flex:0 1 auto; overflow:visible; color:var(--text); font-size:var(--fit-number-size,11px); font-variant-numeric:tabular-nums; font-weight:700; line-height:1; white-space:nowrap; transform:scaleX(var(--fit-number-scale,1)); transform-origin:left center; transition:font-size .16s ease,transform .16s ease; }
+      .conversation-meta-value em { flex:0 0 auto; color:var(--muted); font-size:8px; font-style:normal; font-weight:600; }
+      .context-remaining-block { padding-left:10px; border-left:1px solid var(--line); text-align:right; }
+      .current-conversation-context-value { color:var(--text); font-size:13px; font-variant-numeric:tabular-nums; font-weight:750; letter-spacing:-.02em; line-height:1; }
+      .current-conversation-track { height:4px; overflow:hidden; border-radius:6px; background:rgba(120,126,147,.12); }
       .current-conversation-track i { display:block; height:100%; border-radius:inherit; background:linear-gradient(90deg,var(--context-start),var(--context-end)); transition:width .3s ease,background .3s ease; }
       .is-attention .current-conversation-track i { background:linear-gradient(90deg,#d99016,#f0ba38); }
       .is-high .current-conversation-track i,.is-critical .current-conversation-track i { background:linear-gradient(90deg,#df4655,#f06b61); }
-      .conversation-token-footer { min-width:0; display:flex; flex-direction:column; gap:4px; margin-top:8px; }
-      .current-conversation-context { color:var(--text); font-size:8px; font-weight:650; }
+      .conversation-task-line { min-width:0; display:flex; align-items:center; gap:5px; margin-top:7px; }
+      .conversation-task-line>i { width:4px; height:4px; flex:0 0 auto; border-radius:50%; background:#21afc9; box-shadow:0 0 0 3px rgba(33,175,201,.1); }
+      .conversation-task-line .context-health-detail { min-width:0; }
+      .quota-overview.has-live-token-card .context-health-summary.is-conversation-token { padding:12px 14px; }
+      .quota-overview.has-live-token-card .conversation-token-body { display:grid; grid-template-columns:minmax(0,1fr) minmax(148px,auto); align-items:end; gap:16px; margin:8px 0; }
+      .quota-overview.has-live-token-card .conversation-token-value { margin:0; }
+      .quota-overview.has-live-token-card .conversation-token-meta { margin:0; }
       .counter-reset { animation:counter-reset .22s ease-out; }
       footer { display:flex; align-items:center; margin-top:14px; padding:0 3px; color:var(--muted); font-size:9px; }
       .updated { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -2026,6 +2262,9 @@ class CodexUsageWidget extends HTMLElement {
       .dialog-dismiss { flex:0 0 auto; margin:-5px -5px 0 0; }
       .settings-dialog-card { min-height:180px; }
       .settings-list { min-height:0; overflow-y:auto; margin:18px -5px 0; padding:0 5px 5px; }
+      .setting-group-heading { display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin:15px 2px 7px; }
+      .setting-group-heading strong { font-size:11px; }
+      .setting-group-heading span { color:var(--muted); font-size:8px; }
       .setting-row { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:14px; border:1px solid var(--line); border-radius:15px; background:var(--panel); }
       .setting-copy { min-width:0; display:flex; flex-direction:column; }
       .setting-copy strong { font-size:12px; letter-spacing:-.015em; }
@@ -2041,6 +2280,25 @@ class CodexUsageWidget extends HTMLElement {
       .remote-session-settings,.notification-settings { display:flex; flex-direction:column; gap:9px; margin-top:9px; }
       .remote-session-settings .setting-row,.notification-settings .setting-row { padding:11px 12px; }
       .setting-copy .setting-warning { color:#c47a15; font-weight:650; }
+      .refresh-settings-group { margin-top:9px; }
+      .refresh-settings-toggle { width:100%; height:auto; min-height:58px; text-align:left; }
+      .refresh-settings-toggle .setting-copy { align-items:flex-start; }
+      .refresh-settings-summary { white-space:normal; }
+      .setting-chevron { width:24px; height:24px; display:grid; flex:0 0 auto; place-items:center; border-radius:7px; color:var(--muted); }
+      .setting-chevron svg { width:14px; height:14px; transition:transform .18s ease; }
+      .refresh-settings-toggle.is-expanded .setting-chevron svg { transform:rotate(180deg); }
+      .refresh-settings { display:flex; flex-direction:column; gap:7px; margin-top:7px; }
+      .refresh-settings[hidden] { display:none; }
+      .refresh-setting-card { padding:10px 11px; border:1px solid var(--line); border-radius:13px; background:var(--panel); }
+      .refresh-setting-card.is-disabled { opacity:.58; }
+      .refresh-setting-copy { display:flex; align-items:baseline; justify-content:space-between; gap:8px; margin-bottom:8px; }
+      .refresh-setting-copy strong { flex:0 0 auto; font-size:10px; }
+      .refresh-setting-copy span { min-width:0; overflow:hidden; color:var(--muted); font-size:8px; text-overflow:ellipsis; white-space:nowrap; }
+      .refresh-options { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:4px; padding:3px; border-radius:10px; background:rgba(120,126,147,.08); }
+      .refresh-option { width:auto; height:27px; border-radius:7px; font-size:8px; font-weight:650; white-space:nowrap; }
+      .refresh-option.is-active { color:#675bdf; background:var(--bg); box-shadow:0 1px 5px rgba(25,30,48,.09); }
+      .refresh-option:disabled { cursor:default; opacity:.7; }
+      .refresh-warning { display:block; margin-top:7px; color:#c47a15; font-size:8px; font-weight:650; line-height:1.35; }
       .setting-subrows { display:flex; flex-direction:column; padding:5px 11px; border:1px solid var(--line); border-radius:13px; background:rgba(120,126,147,.035); }
       .setting-subrows>div { min-height:34px; display:flex; align-items:center; justify-content:space-between; gap:12px; border-bottom:1px solid var(--line); color:var(--muted); font-size:9px; }
       .setting-subrows>div:last-child { border-bottom:0; }
@@ -2060,7 +2318,7 @@ class CodexUsageWidget extends HTMLElement {
       .insights-body.is-trend { overflow-y:hidden; }
       .forecast-card { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:6px; }
       .forecast-card>span { min-width:0; display:flex; flex-direction:column; gap:2px; padding:6px 8px; border:1px solid rgba(111,99,230,.15); border-radius:10px; background:rgba(111,99,230,.06); }
-      .forecast-card small { color:var(--muted); font-size:7px; }
+      .forecast-card small { color:var(--muted); font-size:8px; }
       .forecast-card strong { overflow:hidden; font-size:8px; line-height:1.35; text-overflow:ellipsis; white-space:nowrap; }
       .insight-summary { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin-bottom:6px; }
       .insight-summary span { display:flex; flex-direction:column; gap:2px; padding:6px 8px; border:1px solid var(--line); border-radius:11px; background:var(--panel); }
@@ -2079,13 +2337,13 @@ class CodexUsageWidget extends HTMLElement {
       .chart-column.is-today .chart-label { color:#7469ea; font-weight:750; }
       .heatmap-wrap { padding:8px; border:1px solid var(--line); border-radius:13px; background:var(--panel); }
       .heat-grid { display:grid; grid-template-columns:12px auto; justify-content:start; gap:5px; }
-      .heat-weekdays { display:grid; grid-template-rows:repeat(7,16px); gap:3px; color:var(--muted); font-size:7px; text-align:center; }
+      .heat-weekdays { display:grid; grid-template-rows:repeat(7,16px); gap:3px; color:var(--muted); font-size:8px; text-align:center; }
       .heat-weekdays span { display:grid; place-items:center; }
       .heatmap { display:grid; grid-template-rows:repeat(7,16px); grid-auto-flow:column; grid-auto-columns:16px; gap:3px; }
       .heat-cell { width:16px; height:16px; border-radius:3px; background:rgba(120,126,147,.1); }
       .heat-cell:focus { outline:2px solid rgba(111,99,230,.5); outline-offset:1px; }
       .heat-cell.is-empty { visibility:hidden; }.heat-cell.level-1,.heat-legend .level-1 { background:#c8e9ef; }.heat-cell.level-2,.heat-legend .level-2 { background:#7bd0df; }.heat-cell.level-3,.heat-legend .level-3 { background:#31b6d1; }.heat-cell.level-4,.heat-legend .level-4 { background:#178ca9; }
-      .heat-legend { display:flex; align-items:center; justify-content:flex-end; gap:3px; margin-top:8px; color:var(--muted); font-size:7px; }
+      .heat-legend { display:flex; align-items:center; justify-content:flex-end; gap:3px; margin-top:8px; color:var(--muted); font-size:8px; }
       .heat-legend i { width:8px; height:8px; border-radius:2px; background:rgba(120,126,147,.1); }
       .insight-tooltip { position:fixed; z-index:40; max-width:300px; padding:6px 8px; border:1px solid var(--line); border-radius:8px; color:var(--text); background:var(--bg); box-shadow:0 8px 24px rgba(25,30,48,.2); font-size:9px; font-weight:650; line-height:1.25; white-space:nowrap; pointer-events:none; }
       .insight-tooltip[hidden] { display:none; }
@@ -2098,8 +2356,8 @@ class CodexUsageWidget extends HTMLElement {
       .project-title-row { min-width:0; display:flex; align-items:center; justify-content:space-between; gap:10px; }
       .project-title-row>strong { min-width:0; flex:1 1 auto; }
       .insight-project strong,.insight-task-list strong { overflow:hidden; font-size:9px; text-overflow:ellipsis; white-space:nowrap; }
-      .insight-project small,.insight-task-list small { color:var(--muted); font-size:7px; }
-      .project-token { flex:0 0 auto; color:var(--muted); font-size:7px; font-weight:500; white-space:nowrap; }
+      .insight-project small,.insight-task-list small { color:var(--muted); font-size:8px; }
+      .project-token { flex:0 0 auto; color:var(--muted); font-size:8px; font-weight:500; white-space:nowrap; }
       .project-token b,.insight-task-list b { color:#159abc; font-size:9px; white-space:nowrap; }
       .insight-project>button>svg { width:12px; justify-self:center; }
       .insight-project.is-expanded>button>svg { transform:rotate(180deg); }
@@ -2126,12 +2384,12 @@ class CodexUsageWidget extends HTMLElement {
       .context-health-heading { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:start; gap:9px; }
       .context-health-heading>span { min-width:0; display:flex; flex-direction:column; gap:3px; }
       .context-health-heading strong { overflow:hidden; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
-      .context-health-heading strong em { display:inline-block; margin-left:6px; padding:2px 5px; border-radius:6px; color:var(--context-color); background:color-mix(in srgb,var(--context-color) 11%,transparent); font-size:6px; font-style:normal; font-weight:700; vertical-align:1px; }
-      .context-health-heading small { overflow:hidden; color:var(--muted); font-size:7px; text-overflow:ellipsis; white-space:nowrap; }
+      .context-health-heading strong em { display:inline-block; margin-left:6px; padding:2px 5px; border-radius:6px; color:var(--context-color); background:color-mix(in srgb,var(--context-color) 11%,transparent); font-size:8px; font-style:normal; font-weight:700; vertical-align:1px; }
+      .context-health-heading small { overflow:hidden; color:var(--muted); font-size:8px; text-overflow:ellipsis; white-space:nowrap; }
       .context-health-heading>b { color:var(--context-color); font-size:13px; }
       .context-health-track { height:5px; overflow:hidden; margin:8px 0 6px; border-radius:6px; background:rgba(120,126,147,.12); }
       .context-health-track i { display:block; height:100%; border-radius:inherit; background:var(--context-color); }
-      .context-health-meta { display:flex; justify-content:space-between; gap:8px; color:var(--muted); font-size:7px; }
+      .context-health-meta { display:flex; justify-content:space-between; gap:8px; color:var(--muted); font-size:8px; }
       .context-health-meta span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       .context-conversation-total { display:block; margin-top:7px; padding-top:7px; border-top:1px solid var(--line); color:#159abc; font-size:8px; font-weight:700; }
       .conversation-dialog-card { padding-bottom:12px; }
@@ -2178,6 +2436,7 @@ window.codexResetResult = (payload) => document.querySelector("codex-usage-widge
 window.codexLaunchAtLoginResult = (payload) => document.querySelector("codex-usage-widget")?.handleLaunchAtLoginResult(payload);
 window.codexNotificationSettingsResult = (payload) => document.querySelector("codex-usage-widget")?.handleNotificationSettings(payload);
 window.codexRemoteSessionSettingsResult = (payload) => document.querySelector("codex-usage-widget")?.handleRemoteSessionSettings(payload);
+window.codexRefreshSettingsResult = (payload) => document.querySelector("codex-usage-widget")?.handleRefreshSettings(payload);
 window.codexExportResult = (payload) => document.querySelector("codex-usage-widget")?.handleExportResult(payload);
 window.recordCodexTurn = (usage) => document.querySelector("codex-usage-widget")?.recordTurn(usage);
 window.codexUsageSetPanelAnchor = (payload) => document.querySelector("codex-usage-widget")?.setPanelAnchor(payload);
@@ -2190,6 +2449,7 @@ window.codexUsageOpenDialog = (kind) => {
   if (kind === "settings") {
     widget?.requestLaunchAtLoginState();
     widget?.requestRemoteSessionSettings();
+    widget?.requestRefreshSettings();
     widget?.requestNotificationSettings();
   }
 };

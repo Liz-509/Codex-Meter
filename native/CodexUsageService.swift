@@ -1,5 +1,96 @@
 import Foundation
 
+struct RefreshPreferences: Equatable {
+    static let liveOptions = [1, 2, 5, 10]
+    static let generalOptions = [15, 30, 60, 120]
+    static let sshOptions = [30, 60, 120, 300]
+
+    static let defaultLiveSeconds = 2
+    static let defaultGeneralSeconds = 30
+    static let defaultSSHSeconds = 60
+
+    var liveSeconds: Int
+    var generalSeconds: Int
+    var sshSeconds: Int
+
+    init(liveSeconds: Int = defaultLiveSeconds, generalSeconds: Int = defaultGeneralSeconds, sshSeconds: Int = defaultSSHSeconds) {
+        self.liveSeconds = Self.validated(liveSeconds, allowed: Self.liveOptions, fallback: Self.defaultLiveSeconds)
+        self.generalSeconds = Self.validated(generalSeconds, allowed: Self.generalOptions, fallback: Self.defaultGeneralSeconds)
+        self.sshSeconds = Self.validated(sshSeconds, allowed: Self.sshOptions, fallback: Self.defaultSSHSeconds)
+    }
+
+    init(defaults: UserDefaults) {
+        self.init(
+            liveSeconds: defaults.object(forKey: "liveRefreshIntervalSeconds") as? Int ?? Self.defaultLiveSeconds,
+            generalSeconds: defaults.object(forKey: "generalRefreshIntervalSeconds") as? Int ?? Self.defaultGeneralSeconds,
+            sshSeconds: defaults.object(forKey: "sshRefreshIntervalSeconds") as? Int ?? Self.defaultSSHSeconds
+        )
+    }
+
+    mutating func update(from values: [String: Any]) {
+        if let value = (values["liveSeconds"] as? NSNumber)?.intValue {
+            liveSeconds = Self.validated(value, allowed: Self.liveOptions, fallback: liveSeconds)
+        }
+        if let value = (values["generalSeconds"] as? NSNumber)?.intValue {
+            generalSeconds = Self.validated(value, allowed: Self.generalOptions, fallback: generalSeconds)
+        }
+        if let value = (values["sshSeconds"] as? NSNumber)?.intValue {
+            sshSeconds = Self.validated(value, allowed: Self.sshOptions, fallback: sshSeconds)
+        }
+    }
+
+    func persist(to defaults: UserDefaults) {
+        defaults.set(liveSeconds, forKey: "liveRefreshIntervalSeconds")
+        defaults.set(generalSeconds, forKey: "generalRefreshIntervalSeconds")
+        defaults.set(sshSeconds, forKey: "sshRefreshIntervalSeconds")
+    }
+
+    var payload: [String: Any] {
+        [
+            "supported": true,
+            "liveSeconds": liveSeconds,
+            "generalSeconds": generalSeconds,
+            "sshSeconds": sshSeconds,
+            "liveOptions": Self.liveOptions,
+            "generalOptions": Self.generalOptions,
+            "sshOptions": Self.sshOptions
+        ]
+    }
+
+    private static func validated(_ value: Int, allowed: [Int], fallback: Int) -> Int {
+        allowed.contains(value) ? value : fallback
+    }
+}
+
+struct RefreshRequest: Equatable {
+    let general: Bool
+    let remote: Bool
+}
+
+struct RefreshRequestAccumulator {
+    private(set) var general = false
+    private(set) var remote = false
+
+    var isEmpty: Bool { !general && !remote }
+
+    mutating func enqueue(general: Bool, remote: Bool, remoteEnabled: Bool) {
+        self.general = self.general || general
+        self.remote = self.remote || (remote && remoteEnabled)
+    }
+
+    mutating func discardRemote() {
+        remote = false
+    }
+
+    mutating func take(remoteEnabled: Bool) -> RefreshRequest? {
+        guard !isEmpty else { return nil }
+        let request = RefreshRequest(general: general, remote: remote && remoteEnabled)
+        general = false
+        remote = false
+        return request.general || request.remote ? request : nil
+    }
+}
+
 private final class JSONLineResponseCollector: @unchecked Sendable {
     private let condition = NSCondition()
     private var buffer = Data()
@@ -137,6 +228,9 @@ final class CodexUsageService {
         var currentTurnId: String?
         var currentTurnActive = false
         var turnTokens: [String: Int] = [:]
+        var authoritativeTurnIds = Set<String>()
+        var legacyTurnBaselines: [String: Int] = [:]
+        var lastLegacyTotal: Int?
         var usedTokens: Int?
         var maxTokens: Int?
         var updatedAt: Date?
@@ -162,6 +256,8 @@ final class CodexUsageService {
     private var liveContexts: [String: LiveSessionState] = [:]
     private var remoteProjectNames: [String: String] = [:]
     private var remoteProjectHosts: [String: String] = [:]
+    private var cachedAccountResponses: [Int: [String: Any]]?
+    private var cachedRemoteSnapshots: [String: RemoteSessionSnapshot] = [:]
     private let remoteSessions = RemoteSessionCollector()
 
     private enum ServiceError: LocalizedError {
@@ -184,59 +280,100 @@ final class CodexUsageService {
         }
     }
 
-    func fetch(includeRemoteSessions: Bool = false, completion: @escaping ([String: Any]) -> Void) {
+    func fetch(
+        includeRemoteSessions: Bool = false,
+        refreshAccount: Bool = true,
+        refreshRemoteSessions: Bool = true,
+        completion: @escaping ([String: Any]) -> Void
+    ) {
         workQueue.async {
             let localStats = self.cachedLocalStats()
-            var payload = self.localPayload(from: localStats)
+            let cachedStats = includeRemoteSessions
+                ? self.statsIncludingRemote(local: localStats, snapshots: Array(self.cachedRemoteSnapshots.values))
+                : localStats
+            var payload = self.localPayload(from: cachedStats)
 
             var partialPayload = payload
             partialPayload["partial"] = true
-            partialPayload["syncMessage"] = includeRemoteSessions ? "正在同步远程会话与额度" : "正在同步额度"
+            if refreshRemoteSessions && includeRemoteSessions {
+                partialPayload["syncMessage"] = refreshAccount ? "正在同步远程会话与额度" : "正在同步远程会话"
+            } else {
+                partialPayload["syncMessage"] = "正在同步额度"
+            }
             DispatchQueue.main.async {
                 completion(partialPayload)
             }
 
-            let stats = includeRemoteSessions ? self.statsIncludingRemote(local: localStats) : localStats
+            if includeRemoteSessions && refreshRemoteSessions {
+                self.refreshRemoteSnapshotCache(local: localStats)
+            }
+            let stats = includeRemoteSessions
+                ? self.statsIncludingRemote(local: localStats, snapshots: Array(self.cachedRemoteSnapshots.values))
+                : localStats
             payload = self.localPayload(from: stats)
 
-            do {
-                let responses = try self.readAccountData()
-                let limits = try self.result(for: 1, method: "额度", in: responses)
-                let usage = try self.result(for: 2, method: "Token", in: responses)
-                payload = self.localPayload(
-                    from: stats,
-                    threadNames: self.threadNames(from: responses)
-                )
-
-                for (key, value) in limits {
-                    payload[key] = value
+            var accountError: Error?
+            if refreshAccount {
+                do {
+                    let responses = try self.readAccountData()
+                    _ = try self.result(for: 1, method: "额度", in: responses)
+                    _ = try self.result(for: 2, method: "Token", in: responses)
+                    self.cachedAccountResponses = responses
+                } catch {
+                    accountError = error
                 }
+            }
 
-                if let buckets = usage["dailyUsageBuckets"] as? [[String: Any]],
-                    let accountHistory = self.accountHistory(
-                       from: buckets,
-                       localDays: stats.dailyTokens
-                   ) {
-                    payload["history"] = [
-                        "source": "account",
-                        "localFallback": accountHistory.localFallback,
-                        "dailyTokens": accountHistory.days.map {
-                            ["date": $0.date, "tokens": $0.tokens, "source": $0.source]
-                        }
-                    ]
-                    var today = payload["today"] as? [String: Any] ?? [:]
-                    today["tokens"] = accountHistory.days.last?.tokens ?? stats.tokens
-                    today["tokenSource"] = accountHistory.todayFromAccount ? "account" : "local"
-                    payload["today"] = today
+            if let responses = self.cachedAccountResponses {
+                do {
+                    let limits = try self.result(for: 1, method: "额度", in: responses)
+                    let usage = try self.result(for: 2, method: "Token", in: responses)
+                    payload = self.localPayload(
+                        from: stats,
+                        threadNames: self.threadNames(from: responses)
+                    )
+
+                    for (key, value) in limits {
+                        payload[key] = value
+                    }
+
+                    if let buckets = usage["dailyUsageBuckets"] as? [[String: Any]],
+                       let accountHistory = self.accountHistory(
+                           from: buckets,
+                           localDays: stats.dailyTokens
+                       ) {
+                        payload["history"] = [
+                            "source": "account",
+                            "localFallback": accountHistory.localFallback,
+                            "dailyTokens": accountHistory.days.map {
+                                ["date": $0.date, "tokens": $0.tokens, "source": $0.source]
+                            }
+                        ]
+                        var today = payload["today"] as? [String: Any] ?? [:]
+                        today["tokens"] = accountHistory.days.last?.tokens ?? stats.tokens
+                        today["tokenSource"] = accountHistory.todayFromAccount ? "account" : "local"
+                        payload["today"] = today
+                    }
+                    payload["source"] = "Codex App Server"
+                } catch {
+                    if accountError == nil { accountError = error }
                 }
-                payload["source"] = "Codex App Server"
-            } catch {
-                payload["error"] = error.localizedDescription
+            }
+            if let accountError, refreshAccount {
+                payload["error"] = accountError.localizedDescription
             }
 
             DispatchQueue.main.async {
                 completion(payload)
             }
+        }
+    }
+
+    func clearRemoteSessionCache() {
+        workQueue.async {
+            self.cachedRemoteSnapshots.removeAll(keepingCapacity: false)
+            self.remoteProjectNames.removeAll(keepingCapacity: false)
+            self.remoteProjectHosts.removeAll(keepingCapacity: false)
         }
     }
 
@@ -437,7 +574,7 @@ final class CodexUsageService {
                     "clientInfo": [
                         "name": "codex_usage_widget",
                         "title": "Codex Meter",
-                        "version": "1.4.5"
+                        "version": "1.4.6"
                     ]
                 ]
             ], to: input.fileHandleForWriting)
@@ -567,13 +704,24 @@ final class CodexUsageService {
         remoteSessions.connectedHosts(codexHome: codexHomeURL()).count
     }
 
-    private func statsIncludingRemote(local: LocalStats, now: Date = Date()) -> LocalStats {
+    private func refreshRemoteSnapshotCache(local: LocalStats, now: Date = Date()) {
+        let connectedHosts = remoteSessions.connectedHosts(codexHome: codexHomeURL())
+        let connectedIDs = Set(connectedHosts.map(\.id))
+        cachedRemoteSnapshots = cachedRemoteSnapshots.filter { connectedIDs.contains($0.key) }
+        guard !connectedHosts.isEmpty else { return }
+
         let snapshots = remoteSessions.collect(
             codexHome: codexHomeURL(),
             now: now,
             dayKeys: local.dailyTokens.map(\.date),
             timezone: .current
         )
+        for snapshot in snapshots {
+            cachedRemoteSnapshots[snapshot.host.id] = snapshot
+        }
+    }
+
+    private func statsIncludingRemote(local: LocalStats, snapshots: [RemoteSessionSnapshot]) -> LocalStats {
         guard !snapshots.isEmpty else { return local }
 
         var daily = Dictionary(uniqueKeysWithValues: local.dailyTokens.map { ($0.date, $0.tokens) })
@@ -1064,6 +1212,7 @@ final class CodexUsageService {
                   let usage = payload["turn_token_usage"] as? [String: Any],
                   let tokens = (usage["total_tokens"] as? NSNumber)?.intValue else { return }
             state.turnTokens[turnId] = max(0, tokens)
+            state.authoritativeTurnIds.insert(turnId)
             return
         }
         guard rootType == "event_msg", let eventType = payload["type"] as? String else { return }
@@ -1072,6 +1221,7 @@ final class CodexUsageService {
             state.currentTurnId = turnId
             state.currentTurnActive = true
             state.turnTokens[turnId] = state.turnTokens[turnId] ?? 0
+            state.legacyTurnBaselines[turnId] = state.lastLegacyTotal ?? 0
             return
         }
         if eventType == "task_complete" {
@@ -1081,10 +1231,16 @@ final class CodexUsageService {
         }
         guard eventType == "token_count",
               let info = payload["info"] as? [String: Any] else { return }
-        if let turnId = state.currentTurnId,
-           let totalUsage = info["total_token_usage"] as? [String: Any],
-           let tokens = (totalUsage["total_tokens"] as? NSNumber)?.intValue {
-            state.turnTokens[turnId] = max(0, tokens)
+        if let totalUsage = info["total_token_usage"] as? [String: Any],
+           let rawTotal = (totalUsage["total_tokens"] as? NSNumber)?.intValue {
+            let total = max(0, rawTotal)
+            if let turnId = state.currentTurnId,
+               !state.authoritativeTurnIds.contains(turnId) {
+                let baseline = state.legacyTurnBaselines[turnId] ?? state.lastLegacyTotal ?? 0
+                let turnTotal = total >= baseline ? total - baseline : total
+                state.turnTokens[turnId] = max(state.turnTokens[turnId] ?? 0, turnTotal)
+            }
+            state.lastLegacyTotal = total
         }
         guard let maximum = (info["model_context_window"] as? NSNumber)?.intValue,
               maximum > 0,
@@ -1221,6 +1377,19 @@ final class CodexUsageService {
         localPayload(from: cachedLocalStats(now: now, sessionsDirectory: sessionsDirectory))
     }
 
+    func setRemoteSnapshotsForTesting(_ snapshots: [RemoteSessionSnapshot]) {
+        cachedRemoteSnapshots = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.host.id, $0) })
+    }
+
+    func localPayloadWithCachedRemoteForTesting(sessionsDirectory: URL, now: Date) -> [String: Any] {
+        let local = cachedLocalStats(now: now, sessionsDirectory: sessionsDirectory)
+        return localPayload(from: statsIncludingRemote(local: local, snapshots: Array(cachedRemoteSnapshots.values)))
+    }
+
+    func clearRemoteSnapshotsForTesting() {
+        cachedRemoteSnapshots.removeAll()
+    }
+
     func contextMeasurementForTesting(file: URL) -> [String: Any]? {
         guard let measurement = latestContextMeasurement(in: file) else { return nil }
         var result: [String: Any] = [
@@ -1257,6 +1426,8 @@ final class CodexUsageService {
             var compactions = 0
             var currentTurnActive = false
             var turnTokenTotals: [String: Int] = [:]
+            var authoritativeTurnIds = Set<String>()
+            var legacyTurnBaselines: [String: Int] = [:]
 
             contents.enumerateLines { line, _ in
                 guard let data = line.data(using: .utf8),
@@ -1283,6 +1454,7 @@ final class CodexUsageService {
                         currentTurnId = turnId
                         currentTurnActive = true
                         turnTokenTotals[turnId] = turnTokenTotals[turnId] ?? 0
+                        legacyTurnBaselines[turnId] = previousTotal
                         guard let startedAt = self.parseTimestamp(object["timestamp"] as? String),
                               includeConversations,
                               dailyTokens[formatter.string(from: startedAt)] != nil else { return }
@@ -1326,7 +1498,13 @@ final class CodexUsageService {
                           let info = payload["info"] as? [String: Any],
                           let totalUsage = info["total_token_usage"] as? [String: Any],
                           let total = (totalUsage["total_tokens"] as? NSNumber)?.intValue else { return }
-                    if let currentTurnId { turnTokenTotals[currentTurnId] = max(0, total) }
+                    let normalizedTotal = max(0, total)
+                    if let currentTurnId,
+                       !authoritativeTurnIds.contains(currentTurnId) {
+                        let baseline = legacyTurnBaselines[currentTurnId] ?? previousTotal
+                        let turnTotal = normalizedTotal >= baseline ? normalizedTotal - baseline : normalizedTotal
+                        turnTokenTotals[currentTurnId] = max(turnTokenTotals[currentTurnId] ?? 0, turnTotal)
+                    }
 
                     if includeConversations,
                        let maximum = (info["model_context_window"] as? NSNumber)?.intValue,
@@ -1341,7 +1519,7 @@ final class CodexUsageService {
                             preview: contextHealth?.preview ?? conversations[currentTurnId ?? ""]?.preview ?? "未命名任务",
                             conversationTokens: nil,
                             currentTurnId: currentTurnId,
-                            currentTurnTokens: max(0, total),
+                            currentTurnTokens: currentTurnId.flatMap { turnTokenTotals[$0] },
                             currentTurnActive: currentTurnActive,
                             usedTokens: max(0, used),
                             maxTokens: maximum,
@@ -1351,8 +1529,8 @@ final class CodexUsageService {
                             sourceHost: nil
                         )
                     }
-                    let delta = total >= previousTotal ? total - previousTotal : total
-                    previousTotal = total
+                    let delta = normalizedTotal >= previousTotal ? normalizedTotal - previousTotal : normalizedTotal
+                    previousTotal = normalizedTotal
                     if usageRecordSinceTokenCount {
                         usageRecordSinceTokenCount = false
                         return
@@ -1399,12 +1577,14 @@ final class CodexUsageService {
                        let turnUsage = payload["turn_token_usage"] as? [String: Any],
                        let turnTokens = (turnUsage["total_tokens"] as? NSNumber)?.intValue {
                         turnTokenTotals[turnId] = max(0, turnTokens)
+                        authoritativeTurnIds.insert(turnId)
                         conversation.tokens = max(0, turnTokens)
                         conversations[turnId] = conversation
                     } else if let turnId,
                               let turnUsage = payload["turn_token_usage"] as? [String: Any],
                               let turnTokens = (turnUsage["total_tokens"] as? NSNumber)?.intValue {
                         turnTokenTotals[turnId] = max(0, turnTokens)
+                        authoritativeTurnIds.insert(turnId)
                     }
                     usageRecordSinceTokenCount = countedUsageRecord
                     return

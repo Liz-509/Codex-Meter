@@ -140,6 +140,8 @@ final class PanelBridge: NSObject, WKScriptMessageHandler {
     var onRemoteSessionSettingsRequested: (() -> Void)?
     var onRemoteSessionSettingsChangeRequested: ((Bool) -> Void)?
     var onRemoteSessionPromptDismissed: (() -> Void)?
+    var onRefreshSettingsRequested: (() -> Void)?
+    var onRefreshSettingsChangeRequested: (([String: Any]) -> Void)?
     var onMenuBarVisibilityChangeRequested: ((Bool) -> Void)?
     var onExportRequested: ((String) -> Void)?
     private var compactFrame: NSRect?
@@ -236,6 +238,16 @@ final class PanelBridge: NSObject, WKScriptMessageHandler {
 
         if body["action"] as? String == "dismissRemoteSessionPrompt" {
             onRemoteSessionPromptDismissed?()
+            return
+        }
+
+        if body["action"] as? String == "getRefreshSettings" {
+            onRefreshSettingsRequested?()
+            return
+        }
+
+        if body["action"] as? String == "setRefreshSettings" {
+            onRefreshSettingsChangeRequested?(body)
             return
         }
 
@@ -338,9 +350,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     private let defaults = UserDefaults.standard
     private var isRefreshing = false
     private var isResetting = false
-    private var refreshAfterReset = false
-    private var refreshAfterSettingsChange = false
+    private var pendingRefresh = RefreshRequestAccumulator()
+    private var usageRefreshScheduled = false
     private var refreshTimer: Timer?
+    private var remoteRefreshTimer: Timer?
     private var contextHealthTimer: Timer?
     private var isRefreshingContextHealth = false
     private var hasReceivedUsage = false
@@ -380,6 +393,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
 
     func applicationWillTerminate(_ notification: Notification) {
         refreshTimer?.invalidate()
+        remoteRefreshTimer?.invalidate()
         contextHealthTimer?.invalidate()
         retryWorkItem?.cancel()
         lifecycleObservers.forEach { $0.center.removeObserver($0.token) }
@@ -420,6 +434,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         configuration.userContentController.add(bridge, name: "panel")
         let bridgeScript = """
         window.codexMeterHostActive = true;
+        window.codexMeterInitialCapabilities = {
+          contextHealth: true,
+          currentConversationTokens: true,
+          refreshSettings: true
+        };
         window.codexMeterBridge = {
           getUsage() {
             window.webkit.messageHandlers.panel.postMessage({ action: 'getUsage' });
@@ -463,6 +482,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
           },
           dismissRemoteSessionPrompt() {
             window.webkit.messageHandlers.panel.postMessage({ action: 'dismissRemoteSessionPrompt' });
+          },
+          getRefreshSettings() {
+            window.webkit.messageHandlers.panel.postMessage({ action: 'getRefreshSettings' });
+          },
+          setRefreshSettings(payload) {
+            window.webkit.messageHandlers.panel.postMessage({
+              action: 'setRefreshSettings',
+              liveSeconds: payload?.liveSeconds,
+              generalSeconds: payload?.generalSeconds,
+              sshSeconds: payload?.sshSeconds
+            });
           },
           setMenuBarVisible(payload) {
             window.webkit.messageHandlers.panel.postMessage({ action: 'setMenuBarVisible', enabled: payload?.enabled !== false });
@@ -544,6 +574,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         bridge.onRemoteSessionSettingsRequested = { [weak self] in self?.deliverRemoteSessionSettings() }
         bridge.onRemoteSessionSettingsChangeRequested = { [weak self] enabled in self?.setRemoteSessionMonitoring(enabled) }
         bridge.onRemoteSessionPromptDismissed = { [weak self] in self?.dismissRemoteSessionPrompt() }
+        bridge.onRefreshSettingsRequested = { [weak self] in self?.deliverRefreshSettings() }
+        bridge.onRefreshSettingsChangeRequested = { [weak self] body in self?.setRefreshSettings(body) }
         bridge.onMenuBarVisibilityChangeRequested = { [weak self] enabled in self?.setMenuBarVisible(enabled) }
         bridge.onExportRequested = { [weak self] format in self?.exportReport(format: format) }
         self.webView = webView
@@ -591,30 +623,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     }
 
     private func refreshUsage() {
-        guard !isRefreshing else { return }
-        retryWorkItem?.cancel()
-        retryWorkItem = nil
+        requestUsageRefresh(general: true, remote: true)
+        refreshCurrentContextHealth()
+    }
+
+    private func requestUsageRefresh(general: Bool, remote: Bool) {
+        pendingRefresh.enqueue(
+            general: general,
+            remote: remote,
+            remoteEnabled: defaults.bool(forKey: "remoteSessionMonitoringEnabled")
+        )
+        guard !isRefreshing, !usageRefreshScheduled else { return }
+        usageRefreshScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.usageRefreshScheduled = false
+            self.performPendingUsageRefreshIfNeeded()
+        }
+    }
+
+    private func performPendingUsageRefreshIfNeeded() {
+        guard !isRefreshing,
+              let request = pendingRefresh.take(
+                  remoteEnabled: defaults.bool(forKey: "remoteSessionMonitoringEnabled")
+              ) else { return }
+        let refreshAccount = request.general
+        let refreshRemote = request.remote
+        if refreshAccount {
+            retryWorkItem?.cancel()
+            retryWorkItem = nil
+        }
         isRefreshing = true
         let includeRemoteSessions = defaults.bool(forKey: "remoteSessionMonitoringEnabled")
-        usageService.fetch(includeRemoteSessions: includeRemoteSessions) { [weak self] payload in
+        usageService.fetch(
+            includeRemoteSessions: includeRemoteSessions,
+            refreshAccount: refreshAccount,
+            refreshRemoteSessions: refreshRemote
+        ) { [weak self] payload in
             guard let self else { return }
-            if payload["partial"] as? Bool != true,
-               self.refreshAfterReset || self.refreshAfterSettingsChange {
-                self.isRefreshing = false
-                self.refreshAfterReset = false
-                self.refreshAfterSettingsChange = false
-                self.refreshUsage()
-                return
-            }
             var enriched = payload
             enriched["capabilities"] = self.capabilitiesPayload
-            if payload["partial"] as? Bool != true, payload["error"] == nil {
+            if payload["partial"] as? Bool != true, payload["error"] == nil, refreshAccount {
                 let result = self.quotaMonitor.process(payload)
                 enriched["forecast"] = result.forecast
                 self.latestQuotaReadings = result.readings
                 self.latestQuotaForecast = result.forecast
                 self.updateStatusItem(readings: result.readings, forecast: result.forecast)
                 self.deliverNotifications(result.events)
+            } else if payload["partial"] as? Bool != true, payload["error"] == nil {
+                enriched["forecast"] = self.latestQuotaForecast
             } else if payload["partial"] as? Bool != true {
                 self.updateStatusItem(readings: [], forecast: [:])
             }
@@ -625,19 +682,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
 
             guard payload["partial"] as? Bool != true else { return }
             self.isRefreshing = false
-            if payload["error"] != nil {
+            if refreshAccount, payload["error"] != nil {
                 if self.hasReceivedUsage {
                     self.scheduleRetry()
                 } else {
                     self.scheduleStartupRetry()
                 }
-            } else {
+            } else if refreshAccount {
                 self.hasReceivedUsage = true
                 self.retryAttempt = 0
-                self.startRefreshTimerIfNeeded()
             }
-            self.startContextHealthTimerIfNeeded()
-            self.refreshCurrentContextHealth()
+            self.startRefreshTimersIfNeeded()
+            self.performPendingUsageRefreshIfNeeded()
         }
     }
 
@@ -649,11 +705,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             guard let self else { return }
             self.isResetting = false
             self.deliverResetResult(payload)
-            if self.isRefreshing {
-                self.refreshAfterReset = true
-            } else {
-                self.refreshUsage()
-            }
+            self.requestUsageRefresh(general: true, remote: false)
         }
     }
 
@@ -684,6 +736,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             "reportExport": true,
             "contextHealth": true,
             "currentConversationTokens": true,
+            "refreshSettings": true,
             "notificationPromptNeeded": !defaults.bool(forKey: "notificationPromptSeen"),
             "remoteSessionMonitoring": true,
             "remoteSessionMonitoringEnabled": remoteSettings["enabled"] as? Bool ?? false,
@@ -881,16 +934,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         defaults.set(enabled, forKey: "remoteSessionMonitoringEnabled")
         defaults.set(true, forKey: "remoteSessionPromptSeen")
         deliverRemoteSessionSettings()
-        if isRefreshing {
-            refreshAfterSettingsChange = true
+        deliverRefreshSettings()
+        restartRemoteRefreshTimer()
+        if enabled {
+            requestUsageRefresh(general: false, remote: true)
         } else {
-            refreshUsage()
+            pendingRefresh.discardRemote()
+            usageService.clearRemoteSessionCache()
+            requestUsageRefresh(general: true, remote: false)
         }
     }
 
     private func dismissRemoteSessionPrompt() {
         defaults.set(true, forKey: "remoteSessionPromptSeen")
         deliverRemoteSessionSettings()
+    }
+
+    private var refreshPreferences: RefreshPreferences {
+        RefreshPreferences(defaults: defaults)
+    }
+
+    private func refreshSettingsDictionary() -> [String: Any] {
+        var payload = refreshPreferences.payload
+        payload["sshEnabled"] = defaults.bool(forKey: "remoteSessionMonitoringEnabled")
+        return payload
+    }
+
+    private func deliverRefreshSettings() {
+        evaluateJavaScriptCallback(
+            "window.codexRefreshSettingsResult",
+            payload: refreshSettingsDictionary()
+        )
+    }
+
+    private func setRefreshSettings(_ body: [String: Any]) {
+        let previous = refreshPreferences
+        var updated = previous
+        updated.update(from: body)
+        updated.persist(to: defaults)
+        deliverRefreshSettings()
+
+        if updated.liveSeconds != previous.liveSeconds {
+            restartContextHealthTimer()
+            refreshCurrentContextHealth()
+        }
+        if updated.generalSeconds != previous.generalSeconds {
+            restartGeneralRefreshTimer()
+            requestUsageRefresh(general: true, remote: false)
+        }
+        if updated.sshSeconds != previous.sshSeconds {
+            restartRemoteRefreshTimer()
+            requestUsageRefresh(general: false, remote: true)
+        }
     }
 
     private func sendTestNotification() {
@@ -1005,7 +1100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         let delay = delays[retryAttempt]
         retryAttempt += 1
         let workItem = DispatchWorkItem { [weak self] in
-            self?.refreshUsage()
+            self?.requestUsageRefresh(general: true, remote: false)
         }
         retryWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
@@ -1013,22 +1108,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
 
     private func scheduleStartupRetry() {
         let workItem = DispatchWorkItem { [weak self] in
-            self?.refreshUsage()
+            self?.requestUsageRefresh(general: true, remote: false)
         }
         retryWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
     }
 
-    private func startRefreshTimerIfNeeded() {
-        guard refreshTimer == nil else { return }
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            self?.refreshUsage()
+    private func startRefreshTimersIfNeeded() {
+        if refreshTimer == nil { restartGeneralRefreshTimer() }
+        if contextHealthTimer == nil { restartContextHealthTimer() }
+        if remoteRefreshTimer == nil, defaults.bool(forKey: "remoteSessionMonitoringEnabled") {
+            restartRemoteRefreshTimer()
         }
     }
 
-    private func startContextHealthTimerIfNeeded() {
-        guard contextHealthTimer == nil else { return }
-        contextHealthTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+    private func restartGeneralRefreshTimer() {
+        refreshTimer?.invalidate()
+        refreshTimer = Timer.scheduledTimer(
+            withTimeInterval: TimeInterval(refreshPreferences.generalSeconds),
+            repeats: true
+        ) { [weak self] _ in
+            self?.requestUsageRefresh(general: true, remote: false)
+        }
+    }
+
+    private func restartRemoteRefreshTimer() {
+        remoteRefreshTimer?.invalidate()
+        remoteRefreshTimer = nil
+        guard defaults.bool(forKey: "remoteSessionMonitoringEnabled") else { return }
+        remoteRefreshTimer = Timer.scheduledTimer(
+            withTimeInterval: TimeInterval(refreshPreferences.sshSeconds),
+            repeats: true
+        ) { [weak self] _ in
+            self?.requestUsageRefresh(general: false, remote: true)
+        }
+    }
+
+    private func restartContextHealthTimer() {
+        contextHealthTimer?.invalidate()
+        contextHealthTimer = Timer.scheduledTimer(
+            withTimeInterval: TimeInterval(refreshPreferences.liveSeconds),
+            repeats: true
+        ) { [weak self] _ in
             self?.refreshCurrentContextHealth()
         }
     }

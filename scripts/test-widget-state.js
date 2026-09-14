@@ -11,6 +11,7 @@ class FakeHTMLElement {
   }
 
   hasAttribute() { return false; }
+  setAttribute() {}
 }
 
 const sandbox = {
@@ -45,7 +46,21 @@ vm.createContext(sandbox);
 const source = fs.readFileSync(path.join(__dirname, "..", "usage-widget.js"), "utf8");
 vm.runInContext(source, sandbox, { filename: "usage-widget.js" });
 
+sandbox.codexMeterInitialCapabilities = {
+  contextHealth: true,
+  currentConversationTokens: true,
+  refreshSettings: true,
+};
+const macColdStartWidget = new Widget();
+macColdStartWidget.render();
+assert.equal(macColdStartWidget.data.capabilities.currentConversationTokens, true, "macOS 静态能力应在首个数据载荷前生效");
+assert.match(macColdStartWidget.shadowRoot.innerHTML, /quota-overview has-live-token-card/, "无数据首屏也应直接使用双圆环布局");
+assert.match(macColdStartWidget.shadowRoot.innerHTML, /context-health-summary is-conversation-token is-empty/, "无数据首屏应直接显示本轮回答占位卡片");
+assert.match(macColdStartWidget.shadowRoot.innerHTML, /live-badge is-complete">等待/, "无数据首屏不得把本轮回答误报为已完成或实时");
+delete sandbox.codexMeterInitialCapabilities;
+
 const widget = new Widget();
+assert.equal(widget.data.capabilities.currentConversationTokens, undefined, "未注入 macOS 能力的旧宿主应继续使用兼容布局");
 widget.renderValues = () => {};
 
 let nextFrameID = 1;
@@ -139,6 +154,112 @@ widget.handleRemoteSessionSettings({
 });
 assert.equal(widget.data.capabilities.remoteSessionMonitoringEnabled, true, "开启后应同步更新 SSH 监控状态");
 assert.equal(widget.data.capabilities.remoteSessionPromptNeeded, false, "开启后应隐藏 SSH 监控引导");
+
+widget.handleRefreshSettings({
+  supported: true,
+  liveSeconds: 1,
+  generalSeconds: 60,
+  sshSeconds: 30,
+  liveOptions: [1, 2, 5, 10],
+  generalOptions: [15, 30, 60, 120],
+  sshOptions: [30, 60, 120, 300],
+});
+assert.equal(widget.refreshSettings.liveSeconds, 1, "应保存实时回答刷新档位");
+assert.equal(widget.refreshSettings.generalSeconds, 60, "应保存常规数据刷新档位");
+assert.equal(widget.refreshSettings.sshSeconds, 30, "应保存 SSH 刷新档位");
+assert.equal(widget.data.capabilities.refreshSettings, true, "宿主声明后应启用刷新设置");
+assert.equal(widget.refreshIntervalLabel(120), "2 分钟", "分钟档位应使用易读标签");
+
+const refreshToggleClasses = new Set();
+const refreshToggleAttributes = {};
+const refreshSettingsToggle = {
+  setAttribute: (name, value) => { refreshToggleAttributes[name] = value; },
+  classList: { toggle: (name, enabled) => enabled ? refreshToggleClasses.add(name) : refreshToggleClasses.delete(name) },
+};
+const refreshSettingsSummary = { textContent: "" };
+const refreshSettingsContainer = { innerHTML: "", hidden: false };
+widget.shadowRoot.querySelector = (selector) => selector === ".refresh-settings"
+  ? refreshSettingsContainer
+  : selector === ".refresh-settings-toggle"
+    ? refreshSettingsToggle
+    : selector === ".refresh-settings-summary"
+      ? refreshSettingsSummary
+      : null;
+widget.data.capabilities.remoteSessionMonitoringEnabled = false;
+widget.refreshSettingsExpanded = false;
+widget.renderRefreshSettings();
+assert.equal(refreshSettingsContainer.hidden, true, "刷新频率在设置中应默认收起");
+assert.equal(refreshToggleAttributes["aria-expanded"], "false", "收起状态应同步无障碍属性");
+assert.equal(refreshSettingsSummary.textContent, "实时 1 秒 · 常规 1 分钟 · SSH 30 秒", "收起列表应概括当前三个刷新档位");
+assert.match(refreshSettingsContainer.innerHTML, /开启 SSH 对话监控后生效/, "SSH 关闭时应提示档位尚未生效");
+assert.match(refreshSettingsContainer.innerHTML, /data-refresh-kind="ssh"[^>]*disabled/, "SSH 关闭时应禁用远端档位");
+widget.refreshSettingsExpanded = true;
+widget.data.capabilities.remoteSessionMonitoringEnabled = true;
+widget.renderRefreshSettings();
+assert.equal(refreshSettingsContainer.hidden, false, "展开刷新频率后应显示三组档位");
+assert.equal(refreshToggleAttributes["aria-expanded"], "true", "展开状态应同步无障碍属性");
+assert.ok(refreshToggleClasses.has("is-expanded"), "展开状态应旋转列表箭头");
+assert.match(refreshSettingsContainer.innerHTML, /高频 SSH 刷新会增加网络、耗电和远端主机负载/, "SSH 选择 30 秒时应显示高频提醒");
+widget.openDialog("settings");
+assert.equal(widget.refreshSettingsExpanded, false, "重新打开设置时刷新频率应恢复收起");
+assert.equal(refreshSettingsContainer.hidden, true, "重新打开设置时不应保留上次展开状态");
+
+const mediumFit = widget.numberFitResult(200, 100, 25, 10);
+assert.equal(mediumFit.fontSize, 12.5, "大数字应优先通过字号缩放适配宽度");
+assert.equal(mediumFit.scale, 1, "未触及安全字号时不应水平压缩");
+const extremeFit = widget.numberFitResult(500, 100, 25, 10);
+assert.equal(extremeFit.fontSize, 10, "极端大数应停在安全字号下限");
+assert.equal(extremeFit.scale, 0.5, "达到安全下限后应水平微调以保证完整显示");
+assert.equal(widget.formatNumber(9_999), "9,999", "四位数应保留标准格式");
+assert.equal(widget.formatNumber(10_000), "1万", "万级数字应使用中文紧凑格式");
+assert.equal(widget.formatNumber(12_345_000), "1234.5万", "较长万级数字不得提前截断");
+assert.equal(widget.formatNumber(Number.MAX_SAFE_INTEGER), "9007.2万亿", "最大安全整数应生成可完整适配的文本");
+
+const refreshSettingsGroup = { hidden: false };
+widget.shadowRoot.querySelector = (selector) => selector === ".refresh-settings"
+  ? refreshSettingsContainer
+  : selector === ".refresh-settings-group"
+    ? refreshSettingsGroup
+    : null;
+widget.refreshSettings.supported = false;
+widget.data.capabilities.refreshSettings = false;
+widget.renderRefreshSettings();
+assert.equal(refreshSettingsGroup.hidden, true, "旧宿主未声明能力时应隐藏整个刷新设置区域");
+widget.refreshSettings.supported = true;
+widget.data.capabilities.refreshSettings = true;
+
+const layoutClasses = new Set();
+const layoutOverview = {
+  classList: { toggle: (name, enabled) => enabled ? layoutClasses.add(name) : layoutClasses.delete(name) },
+};
+const layoutCardClasses = new Set();
+const layoutCard = {
+  toggleAttribute: () => {},
+  setAttribute: () => {},
+  classList: {
+    remove: (...names) => names.forEach((name) => layoutCardClasses.delete(name)),
+    toggle: (name, enabled) => enabled ? layoutCardClasses.add(name) : layoutCardClasses.delete(name),
+  },
+  querySelector: () => null,
+  querySelectorAll: () => [],
+};
+const layoutWidget = new Widget();
+layoutWidget.animateNumber = () => {};
+layoutWidget.data.capabilities = { contextHealth: true, currentConversationTokens: true };
+layoutWidget.data.contextHealth = { sessions: [] };
+layoutWidget.shadowRoot.querySelector = (selector) => selector === ".context-health-summary"
+  ? layoutCard
+  : selector === ".quota-overview"
+    ? layoutOverview
+    : null;
+layoutWidget.renderContextHealthSummary();
+assert.ok(layoutClasses.has("has-live-token-card"), "macOS 实时 Token 能力应启用双圆环与全宽本轮布局");
+layoutWidget.data.capabilities = { contextHealth: true };
+layoutWidget.renderContextHealthSummary();
+assert.equal(layoutClasses.has("has-live-token-card"), false, "旧宿主未声明实时 Token 能力时应保留原布局");
+assert.ok(source.indexOf('<div class="quota-hero secondary-quota-hero">') < source.indexOf('data-action="context-health-detail"'), "每周圆环应排在本轮回答卡片之前");
+assert.match(source, /\.quota-overview\.has-live-token-card \.context-health-summary \{ grid-column:1\/-1;/, "本轮回答在 macOS 布局中应占满整行");
+assert.match(source, /\.quota-overview\.has-live-token-card \+ \.weekly \{ display:none;/, "macOS 双圆环布局应隐藏旧每周进度条");
 
 const remoteSettingsContainer = { innerHTML: "" };
 widget.shadowRoot.querySelector = (selector) => selector === ".remote-session-settings" ? remoteSettingsContainer : null;
