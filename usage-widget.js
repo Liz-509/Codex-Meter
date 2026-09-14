@@ -142,6 +142,7 @@ class CodexUsageWidget extends HTMLElement {
     this.hoverCloseTimer = null;
     this.collapseResizeTimer = null;
     this.quotaAnimationFrame = null;
+    this.numberAnimations = new Map();
     this.expansionPointer = { x: 33, y: 33 };
     this.dragging = false;
     this.suppressHoverUntilLeave = false;
@@ -184,7 +185,10 @@ class CodexUsageWidget extends HTMLElement {
     this.onVisibilityChanged = () => {
       this.pageVisible = !document.hidden;
       this.updateMotionState();
-      if (!this.pageVisible) this.finishQuotaFill();
+      if (!this.pageVisible) {
+        this.finishQuotaFill();
+        this.finishNumberAnimations();
+      }
     };
   }
 
@@ -208,12 +212,19 @@ class CodexUsageWidget extends HTMLElement {
     clearInterval(this.compactMotionTimer);
     this.compactMotionTimer = null;
     cancelAnimationFrame(this.quotaAnimationFrame);
+    for (const animation of this.numberAnimations.values()) {
+      if (animation.frame != null) cancelAnimationFrame(animation.frame);
+    }
+    this.numberAnimations.clear();
   }
 
   setHostActive(active) {
     this.hostActive = active !== false;
     this.updateMotionState();
-    if (!this.hostActive) this.finishQuotaFill();
+    if (!this.hostActive) {
+      this.finishQuotaFill();
+      this.finishNumberAnimations();
+    }
   }
 
   updateMotionState() {
@@ -275,6 +286,15 @@ class CodexUsageWidget extends HTMLElement {
     const fill = this.shadowRoot.querySelector(".secondary-fill");
     ring?.style.setProperty("--value", this.data.primary.remainingPercent ?? 0);
     if (fill) fill.style.width = `${this.data.secondary.remainingPercent ?? 0}%`;
+  }
+
+  finishNumberAnimations() {
+    for (const animation of this.numberAnimations.values()) {
+      if (animation.frame != null) cancelAnimationFrame(animation.frame);
+      animation.current = animation.target;
+      animation.frame = null;
+      animation.element.textContent = animation.formatter(Math.round(animation.target));
+    }
   }
 
   beginPanelTransition() {
@@ -453,6 +473,62 @@ class CodexUsageWidget extends HTMLElement {
   formatExactNumber(value) {
     if (value == null) return "—";
     return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 }).format(value);
+  }
+
+  numericValue(value) {
+    if (value == null) return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(0, number) : null;
+  }
+
+  animateNumber(key, element, targetValue, formatter = (value) => this.formatNumber(value), identity = key) {
+    if (!element) return;
+    const target = this.numericValue(targetValue);
+    const previous = this.numberAnimations.get(key);
+    if (target == null) {
+      if (previous?.frame != null) cancelAnimationFrame(previous.frame);
+      this.numberAnimations.delete(key);
+      element.textContent = "—";
+      return;
+    }
+
+    const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const shouldSnap = !this.hostActive || !this.pageVisible || reduceMotion;
+    const identityChanged = previous != null && previous.identity !== identity;
+    const startValue = identityChanged ? 0 : previous?.current ?? 0;
+    if (previous?.frame != null) cancelAnimationFrame(previous.frame);
+
+    if (identityChanged) {
+      element.classList.remove("counter-reset");
+      void element.offsetWidth;
+      element.classList.add("counter-reset");
+    }
+    if (shouldSnap || startValue === target) {
+      element.textContent = formatter(Math.round(target));
+      this.numberAnimations.set(key, { current: target, target, identity, frame: null, element, formatter });
+      return;
+    }
+
+    const animation = { current: startValue, target, identity, frame: null, element, formatter };
+    const duration = previous == null ? 850 : 650;
+    let startedAt = null;
+    const draw = (now) => {
+      if (startedAt == null) startedAt = now;
+      const progress = Math.min(1, Math.max(0, (now - startedAt) / duration));
+      const eased = 1 - Math.pow(1 - progress, 3);
+      animation.current = startValue + (target - startValue) * eased;
+      element.textContent = formatter(Math.round(animation.current));
+      if (progress < 1 && this.hostActive && this.pageVisible) {
+        animation.frame = requestAnimationFrame(draw);
+      } else {
+        animation.current = target;
+        animation.frame = null;
+        element.textContent = formatter(Math.round(target));
+      }
+    };
+    this.numberAnimations.set(key, animation);
+    element.textContent = formatter(Math.round(startValue));
+    animation.frame = requestAnimationFrame(draw);
   }
 
   localDateKey(date = new Date()) {
@@ -1141,6 +1217,10 @@ class CodexUsageWidget extends HTMLElement {
         status: "empty",
         label: "暂无数据",
         remaining: null,
+        conversationTokens: null,
+        currentTurnId: null,
+        currentTurnTokens: null,
+        currentTurnActive: false,
         detail: this.data.contextHealth?.currentTaskName || (currentTaskId ? "等待当前对话写入上下文用量" : "等待 Codex 写入上下文用量"),
       };
     }
@@ -1149,6 +1229,11 @@ class CodexUsageWidget extends HTMLElement {
       supported,
       available: true,
       ...health,
+      taskId: String(session.threadId || session.taskId || ""),
+      conversationTokens: this.numericValue(session.conversationTokens),
+      currentTurnId: String(session.currentTurnId || ""),
+      currentTurnTokens: this.numericValue(session.currentTurnTokens),
+      currentTurnActive: session.currentTurnActive === true,
       detail: session.name || "未命名任务",
     };
   }
@@ -1162,19 +1247,44 @@ class CodexUsageWidget extends HTMLElement {
     const ring = card.querySelector(".context-health-ring");
     const percent = card.querySelector(".context-health-percent");
     const value = card.querySelector(".context-health-value");
-    const detail = card.querySelector(".context-health-detail");
+    const details = card.querySelectorAll(".context-health-detail");
+    const legacy = card.querySelector(".legacy-context-health");
+    const conversation = card.querySelector(".conversation-token-summary");
+    const turnValue = card.querySelector(".current-turn-token-value");
+    const conversationValue = card.querySelector(".current-conversation-token-value");
+    const conversationContext = card.querySelector(".current-conversation-context");
+    const conversationTrack = card.querySelector(".current-conversation-track i");
+    const liveBadge = card.querySelector(".live-badge");
+    const tokenMode = Boolean(this.data.capabilities?.currentConversationTokens);
     card.classList.remove("is-empty", "is-attention", "is-high", "is-critical");
     card.classList.toggle("is-empty", !state.available);
+    card.classList.toggle("is-conversation-token", tokenMode);
     card.classList.toggle("is-attention", state.status === "attention");
     card.classList.toggle("is-high", state.status === "high");
     card.classList.toggle("is-critical", state.status === "critical");
     ring?.style.setProperty("--value", state.remaining ?? 0);
     if (percent) percent.textContent = state.available ? `${Math.round(state.remaining)}%` : "—";
     if (value) value.textContent = state.label;
-    if (detail) detail.textContent = state.detail;
-    card.setAttribute("aria-label", state.available
-      ? `查看上下文健康度，${state.label}，剩余 ${Math.round(state.remaining)}%`
-      : `查看上下文健康度，${state.label}`);
+    details.forEach((detail) => { detail.textContent = state.detail; });
+    if (legacy) legacy.hidden = tokenMode;
+    if (conversation) conversation.hidden = !tokenMode;
+    if (tokenMode) {
+      this.animateNumber("current-turn-tokens", turnValue, state.currentTurnTokens, (value) => this.formatNumber(value), state.currentTurnId || "no-turn");
+      this.animateNumber("current-conversation-tokens", conversationValue, state.conversationTokens, (value) => this.formatNumber(value), state.taskId || "no-task");
+      if (conversationContext) conversationContext.textContent = state.available ? `上下文剩余 ${Math.round(state.remaining)}%` : "等待对话用量";
+      if (conversationTrack) conversationTrack.style.width = `${state.available ? state.used : 0}%`;
+      if (liveBadge) {
+        liveBadge.classList.toggle("is-complete", !state.currentTurnActive);
+        liveBadge.innerHTML = state.currentTurnActive ? "<i></i>实时" : "已完成";
+      }
+    }
+    card.setAttribute("aria-label", tokenMode
+      ? state.currentTurnTokens == null
+        ? "查看当前对话 Tokens，等待数据"
+        : `查看当前对话，本轮回答消耗 ${this.formatExactNumber(state.currentTurnTokens)} Tokens，本对话累计 ${this.formatExactNumber(state.conversationTokens)} Tokens，上下文剩余 ${Math.round(state.remaining)}%`
+      : state.available
+        ? `查看上下文健康度，${state.label}，剩余 ${Math.round(state.remaining)}%`
+        : `查看上下文健康度，${state.label}`);
   }
 
   renderContextHealth() {
@@ -1198,10 +1308,14 @@ class CodexUsageWidget extends HTMLElement {
       const health = this.contextHealthStatus(session);
       const usedTokens = Math.max(0, Number(session.usedTokens) || 0);
       const maxTokens = Math.max(0, Number(session.maxTokens) || 0);
+      const conversationTokens = this.numericValue(session.conversationTokens);
+      const currentTurnTokens = this.numericValue(session.currentTurnTokens);
       const project = session.projectName || "非项目中对话";
       const compactions = Math.max(0, Number(session.compactions) || 0);
       const isCurrent = String(session.threadId || session.taskId || "") === currentTaskId;
-      return `<article class="context-health-item is-${this.escapeHTML(health.status)}${isCurrent ? " is-current" : ""}"><div class="context-health-heading"><span><strong>${this.escapeHTML(session.name || "未命名任务")}${isCurrent ? '<em>当前对话</em>' : ""}</strong><small>${this.escapeHTML(project)} · ${this.escapeHTML(this.shortDateTime(session.lastActive))}</small></span><b>${Math.round(health.remaining)}%</b></div><div class="context-health-track"><i style="width:${health.used}%"></i></div><div class="context-health-meta"><span>${this.escapeHTML(health.label)} · 已用 ${this.escapeHTML(this.formatExactNumber(usedTokens))} / ${this.escapeHTML(this.formatExactNumber(maxTokens))}</span><span>${compactions ? `已压缩 ${compactions} 次` : "尚未压缩"}</span></div></article>`;
+      const turnTotal = currentTurnTokens == null ? "" : ` · 本轮 ${this.escapeHTML(this.formatNumber(currentTurnTokens))}`;
+      const conversationTotal = conversationTokens == null ? "" : `<span class="context-conversation-total">本对话 ${this.escapeHTML(this.formatNumber(conversationTokens))} Tokens${turnTotal}</span>`;
+      return `<article class="context-health-item is-${this.escapeHTML(health.status)}${isCurrent ? " is-current" : ""}"><div class="context-health-heading"><span><strong>${this.escapeHTML(session.name || "未命名任务")}${isCurrent ? '<em>当前对话</em>' : ""}</strong><small>${this.escapeHTML(project)} · ${this.escapeHTML(this.shortDateTime(session.lastActive))}</small></span><b>${Math.round(health.remaining)}%</b></div><div class="context-health-track"><i style="width:${health.used}%"></i></div><div class="context-health-meta"><span>${this.escapeHTML(health.label)} · 已用 ${this.escapeHTML(this.formatExactNumber(usedTokens))} / ${this.escapeHTML(this.formatExactNumber(maxTokens))}</span><span>${compactions ? `已压缩 ${compactions} 次` : "尚未压缩"}</span></div>${conversationTotal}</article>`;
     }).join("")}`;
   }
 
@@ -1574,8 +1688,9 @@ class CodexUsageWidget extends HTMLElement {
     secondaryFill.style.width = `${s ?? 0}%`;
     this.shadowRoot.querySelector(".secondary-reset").textContent = this.formatReset(this.data.secondary.resetsAt);
     this.shadowRoot.querySelector(".reset-count").textContent = this.formatNumber(this.data.resetCredits);
-    this.shadowRoot.querySelector(".token-count").textContent = this.formatNumber(this.data.todayTokens);
-    this.shadowRoot.querySelector(".question-count").textContent = this.formatNumber(this.data.todayQuestions);
+    const todayIdentity = this.localDateKey();
+    this.animateNumber("today-tokens", this.shadowRoot.querySelector(".token-count"), this.data.todayTokens, (value) => this.formatNumber(value), todayIdentity);
+    this.animateNumber("today-questions", this.shadowRoot.querySelector(".question-count"), this.data.todayQuestions, (value) => this.formatNumber(value), todayIdentity);
     this.shadowRoot.querySelector(".plan").textContent = this.data.plan;
     const updated = this.shadowRoot.querySelector(".updated");
     updated.textContent = `${this.data.syncMessage} · ${new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(this.data.updatedAt)}`;
@@ -1641,8 +1756,17 @@ class CodexUsageWidget extends HTMLElement {
               </div>
             </div>
             <button class="context-health-summary" data-action="context-health-detail" type="button" aria-haspopup="dialog" hidden>
-              <span class="ring context-health-ring" style="--value:0" aria-hidden="true"><span class="ring-inner"><strong class="context-health-percent">—</strong><span>剩余</span></span></span>
-              <span class="context-health-copy"><small>上下文健康度</small><strong class="context-health-value">暂无数据</strong><span class="context-health-detail">等待 Codex 写入上下文用量</span></span>
+              <span class="legacy-context-health">
+                <span class="ring context-health-ring" style="--value:0" aria-hidden="true"><span class="ring-inner"><strong class="context-health-percent">—</strong><span>剩余</span></span></span>
+                <span class="context-health-copy"><small>上下文健康度</small><strong class="context-health-value">暂无数据</strong><span class="context-health-detail">等待 Codex 写入上下文用量</span></span>
+              </span>
+              <span class="conversation-token-summary" hidden>
+                <span class="conversation-token-heading"><small>本轮回答</small><span class="live-badge"><i></i>实时</span></span>
+                <span class="conversation-token-value"><strong class="current-turn-token-value">—</strong><em>Tokens</em></span>
+                <span class="conversation-total-line">本对话累计 <strong class="current-conversation-token-value">—</strong> Tokens</span>
+                <span class="current-conversation-track" aria-hidden="true"><i></i></span>
+                <span class="conversation-token-footer"><span class="current-conversation-context">等待对话用量</span><span class="context-health-detail">等待 Codex 写入上下文用量</span></span>
+              </span>
             </button>
           </div>
 
@@ -1655,7 +1779,7 @@ class CodexUsageWidget extends HTMLElement {
           <div class="stats">
             <button class="stat reset-stat" data-action="reset-credit" type="button" aria-describedby="reset-stat-tooltip" disabled><span class="stat-icon violet">${ICONS.reset}</span><span class="stat-value reset-count">${this.formatNumber(this.data.resetCredits)}</span><span class="stat-label reset-label">重置次数</span><span class="stat-tooltip" id="reset-stat-tooltip" role="tooltip">使用一次重置额度</span></button>
             <button class="stat detail-stat" data-action="tokens-detail" type="button" aria-haspopup="dialog" aria-describedby="tokens-stat-tooltip"><span class="stat-icon cyan">${ICONS.token}</span><span class="stat-value token-count">${this.formatNumber(this.data.todayTokens)}</span><span class="stat-label">今日 Tokens</span><span class="stat-tooltip" id="tokens-stat-tooltip" role="tooltip">最近7天Tokens</span></button>
-            <button class="stat detail-stat" data-action="conversations-detail" type="button" aria-haspopup="dialog" aria-describedby="conversations-stat-tooltip"><span class="stat-icon coral">${ICONS.message}</span><span class="stat-value question-count">${this.data.todayQuestions}</span><span class="stat-label">今日对话</span><span class="stat-tooltip" id="conversations-stat-tooltip" role="tooltip">详情</span></button>
+            <button class="stat detail-stat" data-action="conversations-detail" type="button" aria-haspopup="dialog" aria-describedby="conversations-stat-tooltip"><span class="stat-icon coral">${ICONS.message}</span><span class="stat-value question-count">${this.formatNumber(this.data.todayQuestions)}</span><span class="stat-label">今日对话</span><span class="stat-tooltip" id="conversations-stat-tooltip" role="tooltip">详情</span></button>
           </div>
 
           <footer><span class="status-dot"></span><span class="updated">刚刚更新</span><span class="theme-label">跟随系统</span></footer>
@@ -1838,11 +1962,13 @@ class CodexUsageWidget extends HTMLElement {
       .stat-icon { width:25px; height:25px; display:grid; place-items:center; margin-bottom:10px; border-radius:8px; }
       .stat-icon svg { width:14px; height:14px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
       .violet { color:#7469ea; background:rgba(116,105,234,.12); }.cyan { color:#159abc; background:rgba(21,154,188,.11); }.coral { color:#e76876; background:rgba(231,104,118,.11); }
-      .stat-value { display:block; overflow:hidden; font-size:18px; font-weight:700; letter-spacing:-.04em; text-overflow:ellipsis; }
+      .stat-value { display:block; overflow:hidden; font-size:18px; font-weight:700; font-variant-numeric:tabular-nums; letter-spacing:-.04em; text-overflow:ellipsis; }
       .stat-label { display:block; margin-top:3px; color:var(--muted); font-size:9px; white-space:nowrap; }
       .context-health-summary { --context-start:#26a875; --context-end:#4fc993; --context-glow:rgba(44,173,122,.24); width:100%; height:auto; min-width:0; min-height:158px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:0; overflow:hidden; padding:12px 10px 11px; border:1px solid var(--line); border-radius:18px; color:var(--text); background:var(--panel); text-align:center; }
       .context-health-summary[hidden] { display:none; }
       .context-health-summary:hover,.context-health-summary:focus-visible { border-color:rgba(44,173,122,.3); background:rgba(44,173,122,.075); }
+      .legacy-context-health { width:100%; display:flex; flex-direction:column; align-items:center; }
+      .legacy-context-health[hidden],.conversation-token-summary[hidden] { display:none; }
       .context-health-ring { --quota-start:var(--context-start); --quota-end:var(--context-end); --quota-glow:var(--context-glow); }
       .context-health-summary.is-empty .context-health-ring { --quota-start:#a1a6b5; --quota-end:#b8bdc9; --quota-glow:rgba(120,126,147,.16); }
       .context-health-summary.is-attention .context-health-ring { --quota-start:#d99016; --quota-end:#f0ba38; --quota-glow:rgba(224,157,28,.28); }
@@ -1854,6 +1980,26 @@ class CodexUsageWidget extends HTMLElement {
       .context-health-summary.is-attention .context-health-copy strong { color:#d99016; }
       .context-health-summary.is-high .context-health-copy strong,.context-health-summary.is-critical .context-health-copy strong { color:#df4655; }
       .context-health-detail { max-width:100%; overflow:hidden; color:var(--muted); font-size:8px; text-overflow:ellipsis; white-space:nowrap; }
+      .context-health-summary.is-conversation-token { position:relative; align-items:stretch; justify-content:stretch; padding:14px; text-align:left; background:radial-gradient(circle at 90% 4%,rgba(35,178,204,.13),transparent 42%),var(--panel); }
+      .context-health-summary.is-conversation-token::after { content:""; position:absolute; right:-18px; bottom:-27px; width:88px; height:88px; border-radius:50%; border:16px solid rgba(35,178,204,.05); pointer-events:none; }
+      .context-health-summary.is-conversation-token:hover,.context-health-summary.is-conversation-token:focus-visible { border-color:rgba(21,154,188,.3); background:radial-gradient(circle at 90% 4%,rgba(35,178,204,.17),transparent 44%),rgba(21,154,188,.055); }
+      .conversation-token-summary { position:relative; z-index:1; min-width:0; height:100%; display:flex; flex-direction:column; align-items:stretch; }
+      .conversation-token-heading { display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--muted); font-size:9px; font-weight:650; }
+      .live-badge { display:flex; align-items:center; gap:4px; padding:3px 6px; border-radius:7px; color:#159abc; background:rgba(21,154,188,.09); font-size:7px; font-weight:750; }
+      .live-badge i { width:4px; height:4px; border-radius:50%; background:#21afc9; box-shadow:0 0 0 3px rgba(33,175,201,.12); }
+      .live-badge.is-complete { color:var(--muted); background:rgba(120,126,147,.09); }
+      .conversation-token-value { min-width:0; display:flex; align-items:baseline; gap:5px; margin:10px 0 6px; }
+      .conversation-token-value strong { min-width:0; overflow:hidden; color:#159abc; font-size:25px; font-weight:750; font-variant-numeric:tabular-nums; letter-spacing:-.055em; line-height:1; text-overflow:ellipsis; white-space:nowrap; }
+      .conversation-token-value em { color:var(--muted); font-size:8px; font-style:normal; font-weight:650; }
+      .conversation-total-line { display:flex; align-items:baseline; gap:4px; margin-bottom:9px; color:var(--muted); font-size:7px; white-space:nowrap; }
+      .conversation-total-line strong { max-width:74px; overflow:hidden; color:var(--text); font-size:9px; font-variant-numeric:tabular-nums; text-overflow:ellipsis; }
+      .current-conversation-track { height:5px; overflow:hidden; border-radius:6px; background:rgba(120,126,147,.12); }
+      .current-conversation-track i { display:block; height:100%; border-radius:inherit; background:linear-gradient(90deg,var(--context-start),var(--context-end)); transition:width .3s ease,background .3s ease; }
+      .is-attention .current-conversation-track i { background:linear-gradient(90deg,#d99016,#f0ba38); }
+      .is-high .current-conversation-track i,.is-critical .current-conversation-track i { background:linear-gradient(90deg,#df4655,#f06b61); }
+      .conversation-token-footer { min-width:0; display:flex; flex-direction:column; gap:4px; margin-top:8px; }
+      .current-conversation-context { color:var(--text); font-size:8px; font-weight:650; }
+      .counter-reset { animation:counter-reset .22s ease-out; }
       footer { display:flex; align-items:center; margin-top:14px; padding:0 3px; color:var(--muted); font-size:9px; }
       .updated { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       .status-dot { width:6px; height:6px; flex:0 0 auto; margin-right:6px; border-radius:50%; background:#45be83; box-shadow:0 0 0 3px rgba(69,190,131,.1); }
@@ -1987,6 +2133,7 @@ class CodexUsageWidget extends HTMLElement {
       .context-health-track i { display:block; height:100%; border-radius:inherit; background:var(--context-color); }
       .context-health-meta { display:flex; justify-content:space-between; gap:8px; color:var(--muted); font-size:7px; }
       .context-health-meta span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .context-conversation-total { display:block; margin-top:7px; padding-top:7px; border-top:1px solid var(--line); color:#159abc; font-size:8px; font-weight:700; }
       .conversation-dialog-card { padding-bottom:12px; }
       .conversation-list { min-height:0; display:flex; flex-direction:column; gap:8px; overflow-x:hidden; overflow-y:auto; margin:14px -7px 0; padding:0 7px 6px; overscroll-behavior:contain; scrollbar-width:thin; }
       .conversation-group { flex:0 0 auto; overflow:hidden; border:1px solid var(--line); border-radius:13px; background:rgba(120,126,147,.035); }
@@ -2015,6 +2162,7 @@ class CodexUsageWidget extends HTMLElement {
       @keyframes theme-orbit { 0% { transform:rotate(0) scale(1); } 48% { transform:rotate(-22deg) scale(1.18); } 76% { transform:rotate(7deg) scale(1.06); } 100% { transform:rotate(0) scale(1); } }
       @keyframes refresh-turn { to { transform:rotate(360deg); } }
       @keyframes close-pop { 0% { transform:rotate(0) scale(1); } 60% { transform:rotate(96deg) scale(1.16); } 100% { transform:rotate(90deg) scale(1.08); } }
+      @keyframes counter-reset { 0% { opacity:1; transform:translateY(0); } 45% { opacity:.2; transform:translateY(2px); } 100% { opacity:1; transform:translateY(0); } }
       @media (max-width:520px) { :host { top:16px; right:16px; } }
       @media (prefers-reduced-motion:reduce) { *,*::before,*::after { transition:none!important; animation:none!important; } }
     `;

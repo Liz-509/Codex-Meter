@@ -8,7 +8,7 @@ Codex Meter 是一款适用于 macOS 和 Windows 的轻量级 Codex 原生用量
 
 ## 下载与安装
 
-- [macOS Apple Silicon 安装包 — Codex Meter v1.4.4](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.4/Codex-Meter-macOS-arm64-v1.4.4.dmg)
+- [macOS Apple Silicon 安装包 — Codex Meter v1.4.5](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.5/Codex-Meter-macOS-arm64-v1.4.5.dmg)
 - [Windows 10/11 x64 安装包 — Codex Meter v1.4.2](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.2/Codex-Meter-Windows-x64-v1.4.2.exe)
 
 macOS 用户打开下载的 DMG，将 `Codex Meter` 拖到“应用程序”快捷方式，再从“应用程序”中启动。Windows 用户打开下载的安装 EXE 并按提示操作；可以选择安装位置以及是否创建桌面快捷方式。轻量安装程序只会在系统缺失依赖时下载 .NET 8 Desktop Runtime 和共享 Windows App Runtime，因此首次安装可能需要联网；随后会添加开始菜单入口，并注册到 Windows“已安装的应用”。卸载 Codex Meter 时不会移除共享运行时；卸载程序可选择保留或移除应用偏好设置，不会影响 Codex 会话。Intel Mac 用户可以从源码构建安装包。
@@ -24,7 +24,7 @@ macOS 用户打开下载的 DMG，将 `Codex Meter` 拖到“应用程序”快�
 - 在 macOS 菜单栏或 Windows 系统托盘显示 5 小时额度，并根据近期速度估算是否会在重置前耗尽。
 - 经用户主动授权后，在额度跌破 20%、10%、5%、耗尽或新周期恢复时发送系统通知。
 - 浏览今天的本机对话轮次；启用“监控 SSH 对话”后也包含当前已连接服务器，优先按 Codex 任务合并，并在可用时显示对应的任务名称。
-- 在 5 小时额度右侧通过剩余圆盘查看当前 Codex 任务的上下文健康度，并展开检查最近任务的窗口占用和压缩次数。
+- macOS 在 5 小时额度右侧实时显示本轮回答与当前对话累计 Tokens，并同时提示上下文剩余比例；数字变化使用平滑动画。
 - 在明确确认后使用可用的额度重置次数；Codex Meter 绝不会自动消耗重置次数。
 - 随意拖动紧凑图标，或固定展开面板使其保持打开；固定状态会在重启后保留。
 - 跟随系统外观，或手动选择浅色、深色模式。
@@ -66,11 +66,11 @@ Codex Meter 在首次同步成功后每 30 秒自动刷新一次。刚启动且�
 | 7/30/90 天趋势 | 最近 90 个本地日历日，可切换范围；优先使用账户数据，并用本地数据补齐缺失日期 | 账户用量桶与本地会话 |
 | 项目与任务 | 按会话工作目录、服务器和任务标识聚合 | 本机及选择启用的当前已连接 SSH 服务器的会话元数据 |
 | 趋势估算 | 根据同一额度周期内的剩余百分比变化估算消耗速度和耗尽时间 | 本地额度快照 |
-| 上下文健康度 | 当前交互对话约 2 秒跟随更新，并保留最近 20 个可测量任务的窗口占用与压缩次数 | 本地任务列表与结构化会话事件 |
+| 本轮回答 / 当前对话 Tokens / 上下文健康度 | macOS 约每 2 秒显示当前回答累计 Tokens，并汇总同一任务内各轮得到本对话累计；同时保留最近 20 个可测量任务的窗口占用与压缩次数 | 本地任务列表与结构化会话事件 |
 
 额度低于 20% 时指示器变为黄色，低于 10% 时变为红色。重置时间以相对倒计时显示。“今日对话”窗口优先按 Codex 任务 ID 合并压缩前后的上下文窗口，展示每个任务的时间范围和 Token 总数，并可展开查看单轮详情；旧载荷缺少任务 ID 时才按上下文窗口分组。如果本地 App Server 能够匹配任务，就会使用 Codex 任务名称；否则回退到第一条本地提示词。
 
-上下文健康度使用 Codex 日志中模型直接上报的当前窗口 Token 和上下文上限计算。主面板在 5 小时额度右侧用圆盘显示当前上下文的剩余比例，点击整个模块可查看详情；未取得数据时显示中性圆盘。macOS 与 Windows 都会按 App Server 的最近交互顺序识别当前对话，并只读取对应会话文件尾部，约每 2 秒更新一次；切换或继续一个对话后会自动跟随。已用比例低于 60% 为“健康”，60%–79% 为“注意”，80%–89% 为“紧张”，90% 及以上为“危险”。上下文压缩后会按新窗口重新计算；该指标只反映当前上下文占用，不代表账户额度。
+macOS 主面板以本轮回答为主指标：优先读取 `token_usage_record.turn_token_usage.total_tokens`，旧日志回退到 `token_count.info.total_token_usage.total_tokens`，回答过程中约每 2 秒更新。当前对话累计值是同一任务内各轮最新 Token 值之和，因此开始新问题或压缩上下文都不会错误归零。卡片底部同时显示当前上下文的剩余比例，点击可查看详情。上下文健康度使用模型直接上报的当前窗口 Token 和上下文上限计算；已用比例低于 60% 为“健康”，60%–79% 为“注意”，80%–89% 为“紧张”，90% 及以上为“危险”。本轮、当前对话、上下文窗口、今日用量和账户额度是五个独立指标。SSH 对话沿用常规刷新频率；Windows 的本轮与当前对话 Token 尚待接入。
 
 ## 额度重置次数
 
@@ -193,7 +193,7 @@ window.recordCodexTurn({ inputTokens: 1200, outputTokens: 480 });
 
 宿主可以在用量载荷中选择性提供 `today.tokenSource`、`today.conversations` 和 `history.dailyTokens`，以填充详情对话框。对话条目可以包含 `contextWindowId` 和 `threadName`；对旧载荷分组时，组件会依次回退到 `threadId` 和 `turnId`，任务名称不可用时则使用第一条提示词。旧版载荷仍然兼容；缺少这些字段时，详情界面会显示为空状态。
 
-扩展宿主还可以提供 `insights.projects`、`insights.tasks`、`contextHealth.sessions`、`forecast.primary`、`forecast.secondary` 和能力标志。上下文条目包含任务/项目标识、`usedTokens`、`maxTokens`、`usedPercent`、`remainingPercent`、`status`、`lastActive` 与 `compactions`；只有声明 `capabilities.contextHealth` 才会在 5 小时额度右侧显示上下文剩余圆盘。项目和任务条目可用 `projectKind` 标记 `project` 或 `non_project`；桌面宿主将不能解析到 Git 根目录的会话统一显示为“非项目中对话”。刷新期间的 `partial` 载荷只用于冷启动占位，已有完整快照时不会覆盖稳定的历史、任务、上下文、预测或报告数据。未声明 `capabilities.extendedInsights` 时，共享组件继续显示旧版 7 天图表，避免嵌入式旧宿主出现不可用入口。
+扩展宿主还可以提供 `insights.projects`、`insights.tasks`、`contextHealth.sessions`、`forecast.primary`、`forecast.secondary` 和能力标志。上下文条目包含任务/项目标识、可选的 `conversationTokens`、`currentTurnId`、`currentTurnTokens`、`currentTurnActive`、`usedTokens`、`maxTokens`、`usedPercent`、`remainingPercent`、`status`、`lastActive` 与 `compactions`；声明 `capabilities.contextHealth` 后会显示上下文入口，同时声明 `capabilities.currentConversationTokens` 后主卡片会显示本轮与本对话 Token。项目和任务条目可用 `projectKind` 标记 `project` 或 `non_project`；桌面宿主将不能解析到 Git 根目录的会话统一显示为“非项目中对话”。刷新期间的 `partial` 载荷只用于冷启动占位，已有完整快照时不会覆盖稳定的历史、任务、上下文、预测或报告数据。未声明 `capabilities.extendedInsights` 时，共享组件继续显示旧版 7 天图表，避免嵌入式旧宿主出现不可用入口。
 
 ## 隐私
 

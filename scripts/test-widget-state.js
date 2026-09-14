@@ -48,6 +48,79 @@ vm.runInContext(source, sandbox, { filename: "usage-widget.js" });
 const widget = new Widget();
 widget.renderValues = () => {};
 
+let nextFrameID = 1;
+const pendingFrames = new Map();
+sandbox.requestAnimationFrame = (callback) => {
+  const id = nextFrameID++;
+  pendingFrames.set(id, callback);
+  return id;
+};
+sandbox.cancelAnimationFrame = (id) => pendingFrames.delete(id);
+const advanceFrames = (timestamp) => {
+  const callbacks = [...pendingFrames.values()];
+  pendingFrames.clear();
+  callbacks.forEach((callback) => callback(timestamp));
+};
+const counterClasses = new Set();
+const counterElement = {
+  textContent: "",
+  offsetWidth: 20,
+  classList: {
+    add: (name) => counterClasses.add(name),
+    remove: (name) => counterClasses.delete(name),
+  },
+};
+widget.animateNumber("animated-test", counterElement, 100, String, "same-day");
+assert.equal(counterElement.textContent, "0", "首次载入应从 0 开始而不是跳到目标值");
+advanceFrames(0);
+advanceFrames(425);
+assert.ok(Number(counterElement.textContent) > 0 && Number(counterElement.textContent) < 100, "动画中应显示递增的中间值");
+advanceFrames(850);
+assert.equal(counterElement.textContent, "100", "动画结束必须精确落到目标值");
+
+widget.animateNumber("animated-test", counterElement, 200, String, "same-day");
+advanceFrames(1_000);
+advanceFrames(1_325);
+const rebasedValue = Number(counterElement.textContent);
+widget.animateNumber("animated-test", counterElement, 300, String, "same-day");
+assert.equal(Number(counterElement.textContent), rebasedValue, "动画中收到新值时应从当前画面继续衔接");
+advanceFrames(1_400);
+advanceFrames(2_050);
+assert.equal(counterElement.textContent, "300", "重新衔接后的动画应到达最新目标");
+
+widget.animateNumber("animated-test", counterElement, 50, String, "next-turn");
+assert.equal(counterElement.textContent, "0", "切换轮次时应先重置本轮计数");
+assert.ok(counterClasses.has("counter-reset"), "切换轮次应触发淡出重置样式");
+advanceFrames(2_100);
+advanceFrames(2_750);
+assert.equal(counterElement.textContent, "50");
+
+widget.animateNumber("animated-test", counterElement, 25, String, "next-turn");
+advanceFrames(2_800);
+advanceFrames(3_450);
+assert.equal(counterElement.textContent, "25", "同一指标向下修正时也应平滑到达目标");
+
+widget.pageVisible = false;
+widget.animateNumber("animated-test", counterElement, 80, String, "next-turn");
+assert.equal(counterElement.textContent, "80", "页面隐藏时应直接落到最终值");
+assert.equal(pendingFrames.size, 0, "页面隐藏时不得保留数字动画帧");
+widget.pageVisible = true;
+const normalMatchMedia = sandbox.matchMedia;
+sandbox.matchMedia = () => ({ matches: true });
+widget.animateNumber("reduced-motion-test", counterElement, 144, String, "same-day");
+assert.equal(counterElement.textContent, "144", "减少动态效果开启时应直接显示最终值");
+assert.equal(pendingFrames.size, 0, "减少动态效果开启时不得请求动画帧");
+sandbox.matchMedia = normalMatchMedia;
+
+widget.animateNumber("pause-animation-test", counterElement, 200, String, "same-day");
+advanceFrames(3_500);
+advanceFrames(3_700);
+assert.ok(Number(counterElement.textContent) < 200, "暂停前应仍处于动画中");
+widget.setHostActive(false);
+assert.equal(counterElement.textContent, "200", "宿主暂停时应将运行中的动画落到最终值");
+assert.equal(pendingFrames.size, 0, "宿主暂停时应取消所有数字动画帧");
+widget.setHostActive(true);
+
 widget.handleRemoteSessionSettings({
   supported: true,
   enabled: false,
@@ -178,13 +251,23 @@ for (const [usedPercent, expectedStatus, expectedRemaining] of [
     taskId: "context-summary-task",
     threadId: "context-summary-task",
     name: "当前上下文任务名称",
+    conversationTokens: 128_500,
+    currentTurnId: "turn-live",
+    currentTurnTokens: 31_250,
+    currentTurnActive: true,
     usedPercent,
     remainingPercent: expectedRemaining,
   }];
   contextSummary = contextSummaryWidget.contextHealthSummaryState();
   assert.equal(contextSummary.status, expectedStatus, `已用 ${usedPercent}% 时应进入 ${expectedStatus} 状态`);
   assert.equal(contextSummary.remaining, expectedRemaining, "上下文圆盘必须显示剩余比例");
+  assert.equal(contextSummary.conversationTokens, 128_500, "当前对话卡必须使用整段对话累计 Token");
+  assert.equal(contextSummary.currentTurnTokens, 31_250, "当前对话卡必须提供本轮回答 Token");
+  assert.equal(contextSummary.currentTurnActive, true, "回答中应显示实时状态");
 }
+
+contextSummaryWidget.data.capabilities.currentConversationTokens = true;
+assert.equal(contextSummaryWidget.contextHealthSummaryState().conversationTokens, 128_500, "macOS 能力开启后应保留当前对话累计值");
 
 contextSummaryWidget.data.capabilities = {};
 assert.equal(contextSummaryWidget.contextHealthSummaryState().supported, false, "旧宿主未声明 capability 时应隐藏上下文圆盘");
@@ -232,6 +315,10 @@ widget.updateCurrentContextHealth({
       taskId: "thread-current",
       threadId: "thread-current",
       name: "当前任务",
+      conversationTokens: 96_000,
+      currentTurnId: "turn-current",
+      currentTurnTokens: 24_000,
+      currentTurnActive: true,
       usedTokens: 75_000,
       maxTokens: 100_000,
       usedPercent: 75,
@@ -242,16 +329,20 @@ widget.updateCurrentContextHealth({
 });
 assert.equal(widget.data.contextHealth.currentTaskId, "thread-current", "实时更新应记录当前对话");
 assert.equal(widget.currentContextHealthSession().usedTokens, 75_000, "实时更新应插入当前对话健康度");
+assert.equal(widget.currentContextHealthSession().conversationTokens, 96_000, "实时更新应插入当前对话累计 Token");
+assert.equal(widget.currentContextHealthSession().currentTurnTokens, 24_000, "实时更新应插入本轮回答 Token");
 
 widget.updateCurrentContextHealth({
   contextHealth: {
     currentTaskId: "thread-current",
-    session: { taskId: "thread-current", threadId: "thread-current", usedTokens: 82_000, usedPercent: 82, remainingPercent: 18 },
+    session: { taskId: "thread-current", threadId: "thread-current", currentTurnId: "turn-current", currentTurnTokens: 32_000, usedTokens: 82_000, usedPercent: 82, remainingPercent: 18 },
   },
 });
 assert.equal(widget.contextHealthSessions().filter((session) => session.taskId === "thread-current").length, 1, "同一当前对话不得产生重复条目");
 assert.equal(widget.currentContextHealthSession().maxTokens, 100_000, "增量更新应保留已有窗口上限");
 assert.equal(widget.currentContextHealthSession().usedTokens, 82_000, "增量更新应替换最新用量");
+assert.equal(widget.currentContextHealthSession().conversationTokens, 96_000, "缺少累计值的增量更新应保留最近一次当前对话 Tokens");
+assert.equal(widget.currentContextHealthSession().currentTurnTokens, 32_000, "同一轮的实时 Token 应替换为最新值");
 
 widget.updateUsage({
   rateLimits: {

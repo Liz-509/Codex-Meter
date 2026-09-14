@@ -87,6 +87,10 @@ final class CodexUsageService {
         var contextWindowId: String?
         var projectPath: String
         var preview: String
+        var conversationTokens: Int?
+        var currentTurnId: String?
+        var currentTurnTokens: Int?
+        var currentTurnActive: Bool?
         var usedTokens: Int
         var maxTokens: Int
         var updatedAt: Date
@@ -115,14 +119,29 @@ final class CodexUsageService {
     }
 
     private struct ContextMeasurement {
+        let conversationTokens: Int
+        let currentTurnId: String?
+        let currentTurnTokens: Int?
+        let currentTurnActive: Bool
         let usedTokens: Int
         let maxTokens: Int
         let updatedAt: Date
+        let contextWindowId: String?
+        let compactions: Int
     }
 
-    private struct CachedLiveContext {
-        let signature: SessionFileSignature
-        let measurement: ContextMeasurement?
+    private struct LiveSessionState {
+        var fileIdentifier: UInt64?
+        var readOffset: UInt64 = 0
+        var pendingLine = Data()
+        var currentTurnId: String?
+        var currentTurnActive = false
+        var turnTokens: [String: Int] = [:]
+        var usedTokens: Int?
+        var maxTokens: Int?
+        var updatedAt: Date?
+        var contextWindowId: String?
+        var compactions = 0
     }
 
     private let workQueue = DispatchQueue(label: "com.local.codex-usage.service", qos: .userInitiated)
@@ -140,7 +159,7 @@ final class CodexUsageService {
     private var sessionFiles: [String: CachedSessionFile] = [:]
     private var sessionWindowKey: String?
     private var projectPathCache: [String: String] = [:]
-    private var liveContexts: [String: CachedLiveContext] = [:]
+    private var liveContexts: [String: LiveSessionState] = [:]
     private var remoteProjectNames: [String: String] = [:]
     private var remoteProjectHosts: [String: String] = [:]
     private let remoteSessions = RemoteSessionCollector()
@@ -418,7 +437,7 @@ final class CodexUsageService {
                     "clientInfo": [
                         "name": "codex_usage_widget",
                         "title": "Codex Meter",
-                        "version": "1.4.4"
+                        "version": "1.4.5"
                     ]
                 ]
             ], to: input.fileHandleForWriting)
@@ -623,6 +642,10 @@ final class CodexUsageService {
                         projectName: item["projectName"] as? String
                     ),
                     preview: item["preview"] as? String ?? "未命名任务",
+                    conversationTokens: (item["conversationTokens"] as? NSNumber)?.intValue,
+                    currentTurnId: item["currentTurnId"] as? String,
+                    currentTurnTokens: (item["currentTurnTokens"] as? NSNumber)?.intValue,
+                    currentTurnActive: item["currentTurnActive"] as? Bool,
                     usedTokens: max(0, used),
                     maxTokens: maximum,
                     updatedAt: updatedAt,
@@ -764,6 +787,12 @@ final class CodexUsageService {
                     "lastActive": ISO8601DateFormatter().string(from: context.updatedAt),
                     "compactions": context.compactions
                 ]
+                if let conversationTokens = context.conversationTokens {
+                    row["conversationTokens"] = max(0, conversationTokens)
+                }
+                if let currentTurnId = context.currentTurnId { row["currentTurnId"] = currentTurnId }
+                if let currentTurnTokens = context.currentTurnTokens { row["currentTurnTokens"] = max(0, currentTurnTokens) }
+                if let currentTurnActive = context.currentTurnActive { row["currentTurnActive"] = currentTurnActive }
                 if let threadID = context.threadId { row["threadId"] = threadID }
                 if let windowID = context.contextWindowId { row["contextWindowId"] = windowID }
                 if let sourceHost = context.sourceHost { row["sourceHost"] = sourceHost }
@@ -929,7 +958,7 @@ final class CodexUsageService {
         let projectPath = cwd.isEmpty ? Self.nonProjectKey : canonicalProjectPath(for: cwd)
         let projectName = displayNames(for: [projectPath])[projectPath] ?? Self.nonProjectName
         let usedPercent = min(100, max(0, Double(measurement.usedTokens) / Double(measurement.maxTokens) * 100))
-        context["session"] = [
+        var session: [String: Any] = [
             "taskId": threadID,
             "threadId": threadID,
             "name": taskName,
@@ -941,56 +970,150 @@ final class CodexUsageService {
             "usedPercent": usedPercent,
             "remainingPercent": max(0, 100 - usedPercent),
             "status": contextHealthStatus(usedPercent: usedPercent),
-            "lastActive": ISO8601DateFormatter().string(from: measurement.updatedAt)
-        ] as [String: Any]
+            "lastActive": ISO8601DateFormatter().string(from: measurement.updatedAt),
+            "conversationTokens": measurement.conversationTokens,
+            "currentTurnActive": measurement.currentTurnActive,
+            "compactions": measurement.compactions
+        ]
+        if let currentTurnId = measurement.currentTurnId { session["currentTurnId"] = currentTurnId }
+        if let currentTurnTokens = measurement.currentTurnTokens { session["currentTurnTokens"] = currentTurnTokens }
+        if let contextWindowId = measurement.contextWindowId { session["contextWindowId"] = contextWindowId }
+        context["session"] = session
         return ["contextHealth": context]
     }
 
     private func latestContextMeasurement(in file: URL) -> ContextMeasurement? {
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: file.path),
-              let modifiedAt = attributes[.modificationDate] as? Date else { return liveContexts[file.path]?.measurement }
-        let size = (attributes[.size] as? NSNumber)?.intValue ?? 0
-        let signature = SessionFileSignature(size: size, modifiedAt: modifiedAt)
-        if let cached = liveContexts[file.path], cached.signature == signature {
-            return cached.measurement
+        let previous = liveContexts[file.path]
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: file.path) else {
+            return previous.flatMap(liveMeasurement)
+        }
+        let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+        let fileIdentifier = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value
+        var state = previous ?? LiveSessionState(fileIdentifier: fileIdentifier)
+        if state.fileIdentifier != fileIdentifier || size < state.readOffset {
+            state = LiveSessionState(fileIdentifier: fileIdentifier)
+        }
+        guard size > state.readOffset else {
+            liveContexts[file.path] = state
+            return liveMeasurement(from: state)
         }
 
-        let previous = liveContexts[file.path]?.measurement
-        guard let handle = try? FileHandle(forReadingFrom: file) else { return previous }
+        guard let handle = try? FileHandle(forReadingFrom: file) else {
+            return liveMeasurement(from: state)
+        }
         defer { try? handle.close() }
-        let maximumTailBytes: UInt64 = 1_048_576
-        let end = (try? handle.seekToEnd()) ?? 0
-        let start = end > maximumTailBytes ? end - maximumTailBytes : 0
         do {
-            try handle.seek(toOffset: start)
+            try handle.seek(toOffset: state.readOffset)
         } catch {
-            return previous
+            return liveMeasurement(from: state)
         }
-        let contents = String(decoding: handle.readDataToEndOfFile(), as: UTF8.self)
-        var measurement: ContextMeasurement?
-        for line in contents.split(separator: "\n", omittingEmptySubsequences: true).reversed() {
-            guard line.contains("\"token_count\""),
-                  let data = String(line).data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  object["type"] as? String == "event_msg",
-                  let payload = object["payload"] as? [String: Any],
-                  payload["type"] as? String == "token_count",
-                  let info = payload["info"] as? [String: Any],
-                  let maximum = (info["model_context_window"] as? NSNumber)?.intValue,
-                  maximum > 0,
-                  let lastUsage = info["last_token_usage"] as? [String: Any],
-                  let used = (lastUsage["total_tokens"] as? NSNumber)?.intValue,
-                  let updatedAt = parseTimestamp(object["timestamp"] as? String) else { continue }
-            measurement = ContextMeasurement(
-                usedTokens: max(0, used),
-                maxTokens: maximum,
-                updatedAt: updatedAt
-            )
-            break
+        do {
+            while let chunk = try handle.read(upToCount: 262_144), !chunk.isEmpty {
+                consumeLiveBytes(chunk, into: &state)
+            }
+            state.readOffset = handle.offsetInFile
+        } catch {
+            liveContexts[file.path] = state
+            return liveMeasurement(from: state)
         }
-        let resolved = measurement ?? previous
-        liveContexts[file.path] = CachedLiveContext(signature: signature, measurement: resolved)
-        return resolved
+        if !state.pendingLine.isEmpty,
+           (try? JSONSerialization.jsonObject(with: state.pendingLine)) != nil {
+            let finalLine = state.pendingLine
+            state.pendingLine.removeAll(keepingCapacity: true)
+            applyLiveEvent(finalLine, to: &state)
+        }
+        liveContexts[file.path] = state
+        return liveMeasurement(from: state)
+    }
+
+    private func consumeLiveBytes(_ bytes: Data, into state: inout LiveSessionState) {
+        var appended = state.pendingLine
+        appended.append(bytes)
+        state.pendingLine.removeAll(keepingCapacity: true)
+        var lineStart = appended.startIndex
+        for index in appended.indices where appended[index] == 0x0A {
+            if index > lineStart {
+                applyLiveEvent(Data(appended[lineStart..<index]), to: &state)
+            }
+            lineStart = appended.index(after: index)
+        }
+        if lineStart < appended.endIndex {
+            state.pendingLine = Data(appended[lineStart..<appended.endIndex])
+        }
+    }
+
+    private func applyLiveEvent(_ line: Data, to state: inout LiveSessionState) {
+        guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+              let rootType = object["type"] as? String,
+              let payload = object["payload"] as? [String: Any] else { return }
+
+        if rootType == "session_meta" {
+            if let context = payload["context_window"] as? [String: Any] {
+                state.contextWindowId = context["window_id"] as? String ?? state.contextWindowId
+            }
+            return
+        }
+        if rootType == "compacted" {
+            state.compactions += 1
+            state.contextWindowId = payload["window_id"] as? String ?? state.contextWindowId
+            return
+        }
+        if rootType == "token_usage_record" {
+            let turnId = payload["turn_id"] as? String ?? state.currentTurnId
+            guard let turnId,
+                  let usage = payload["turn_token_usage"] as? [String: Any],
+                  let tokens = (usage["total_tokens"] as? NSNumber)?.intValue else { return }
+            state.turnTokens[turnId] = max(0, tokens)
+            return
+        }
+        guard rootType == "event_msg", let eventType = payload["type"] as? String else { return }
+        if eventType == "task_started" {
+            let turnId = payload["turn_id"] as? String ?? UUID().uuidString.lowercased()
+            state.currentTurnId = turnId
+            state.currentTurnActive = true
+            state.turnTokens[turnId] = state.turnTokens[turnId] ?? 0
+            return
+        }
+        if eventType == "task_complete" {
+            let completedTurn = payload["turn_id"] as? String ?? state.currentTurnId
+            if completedTurn == state.currentTurnId { state.currentTurnActive = false }
+            return
+        }
+        guard eventType == "token_count",
+              let info = payload["info"] as? [String: Any] else { return }
+        if let turnId = state.currentTurnId,
+           let totalUsage = info["total_token_usage"] as? [String: Any],
+           let tokens = (totalUsage["total_tokens"] as? NSNumber)?.intValue {
+            state.turnTokens[turnId] = max(0, tokens)
+        }
+        guard let maximum = (info["model_context_window"] as? NSNumber)?.intValue,
+              maximum > 0,
+              let lastUsage = info["last_token_usage"] as? [String: Any],
+              let used = (lastUsage["total_tokens"] as? NSNumber)?.intValue,
+              let updatedAt = parseTimestamp(object["timestamp"] as? String) else { return }
+        state.usedTokens = max(0, used)
+        state.maxTokens = maximum
+        state.updatedAt = updatedAt
+    }
+
+    private func liveMeasurement(from state: LiveSessionState) -> ContextMeasurement? {
+        guard let usedTokens = state.usedTokens,
+              let maxTokens = state.maxTokens,
+              let updatedAt = state.updatedAt else { return nil }
+        let conversationTokens = state.turnTokens.values.reduce(0) { partial, tokens in
+            partial > Int.max - tokens ? Int.max : partial + tokens
+        }
+        return ContextMeasurement(
+            conversationTokens: conversationTokens,
+            currentTurnId: state.currentTurnId,
+            currentTurnTokens: state.currentTurnId.flatMap { state.turnTokens[$0] },
+            currentTurnActive: state.currentTurnActive,
+            usedTokens: usedTokens,
+            maxTokens: maxTokens,
+            updatedAt: updatedAt,
+            contextWindowId: state.contextWindowId,
+            compactions: state.compactions
+        )
     }
 
     private func cachedLocalStats(now: Date = Date(), sessionsDirectory: URL? = nil) -> LocalStats {
@@ -1100,11 +1223,16 @@ final class CodexUsageService {
 
     func contextMeasurementForTesting(file: URL) -> [String: Any]? {
         guard let measurement = latestContextMeasurement(in: file) else { return nil }
-        return [
+        var result: [String: Any] = [
             "usedTokens": measurement.usedTokens,
             "maxTokens": measurement.maxTokens,
             "lastActive": ISO8601DateFormatter().string(from: measurement.updatedAt)
         ]
+        result["conversationTokens"] = measurement.conversationTokens
+        if let currentTurnId = measurement.currentTurnId { result["currentTurnId"] = currentTurnId }
+        if let currentTurnTokens = measurement.currentTurnTokens { result["currentTurnTokens"] = currentTurnTokens }
+        result["currentTurnActive"] = measurement.currentTurnActive
+        return result
     }
 #endif
 
@@ -1127,6 +1255,8 @@ final class CodexUsageService {
             var previousTotal = 0
             var usageRecordSinceTokenCount = false
             var compactions = 0
+            var currentTurnActive = false
+            var turnTokenTotals: [String: Int] = [:]
 
             contents.enumerateLines { line, _ in
                 guard let data = line.data(using: .utf8),
@@ -1151,6 +1281,8 @@ final class CodexUsageService {
                     if eventType == "task_started" {
                         let turnId = payload["turn_id"] as? String ?? UUID().uuidString.lowercased()
                         currentTurnId = turnId
+                        currentTurnActive = true
+                        turnTokenTotals[turnId] = turnTokenTotals[turnId] ?? 0
                         guard let startedAt = self.parseTimestamp(object["timestamp"] as? String),
                               includeConversations,
                               dailyTokens[formatter.string(from: startedAt)] != nil else { return }
@@ -1167,6 +1299,12 @@ final class CodexUsageService {
                             threadName: nil,
                             sourceHost: nil
                         )
+                        return
+                    }
+
+                    if eventType == "task_complete" {
+                        let completedTurnId = payload["turn_id"] as? String ?? currentTurnId
+                        if completedTurnId == currentTurnId { currentTurnActive = false }
                         return
                     }
 
@@ -1188,6 +1326,7 @@ final class CodexUsageService {
                           let info = payload["info"] as? [String: Any],
                           let totalUsage = info["total_token_usage"] as? [String: Any],
                           let total = (totalUsage["total_tokens"] as? NSNumber)?.intValue else { return }
+                    if let currentTurnId { turnTokenTotals[currentTurnId] = max(0, total) }
 
                     if includeConversations,
                        let maximum = (info["model_context_window"] as? NSNumber)?.intValue,
@@ -1200,6 +1339,10 @@ final class CodexUsageService {
                             contextWindowId: contextWindowId,
                             projectPath: projectPath,
                             preview: contextHealth?.preview ?? conversations[currentTurnId ?? ""]?.preview ?? "未命名任务",
+                            conversationTokens: nil,
+                            currentTurnId: currentTurnId,
+                            currentTurnTokens: max(0, total),
+                            currentTurnActive: currentTurnActive,
                             usedTokens: max(0, used),
                             maxTokens: maximum,
                             updatedAt: updatedAt,
@@ -1255,8 +1398,13 @@ final class CodexUsageService {
                        var conversation = conversations[turnId],
                        let turnUsage = payload["turn_token_usage"] as? [String: Any],
                        let turnTokens = (turnUsage["total_tokens"] as? NSNumber)?.intValue {
+                        turnTokenTotals[turnId] = max(0, turnTokens)
                         conversation.tokens = max(0, turnTokens)
                         conversations[turnId] = conversation
+                    } else if let turnId,
+                              let turnUsage = payload["turn_token_usage"] as? [String: Any],
+                              let turnTokens = (turnUsage["total_tokens"] as? NSNumber)?.intValue {
+                        turnTokenTotals[turnId] = max(0, turnTokens)
                     }
                     usageRecordSinceTokenCount = countedUsageRecord
                     return
@@ -1285,6 +1433,16 @@ final class CodexUsageService {
                     }
                 }
             }
+
+        if var health = contextHealth {
+            health.conversationTokens = turnTokenTotals.values.reduce(0) { partial, tokens in
+                partial > Int.max - tokens ? Int.max : partial + tokens
+            }
+            health.currentTurnId = currentTurnId
+            health.currentTurnTokens = currentTurnId.flatMap { turnTokenTotals[$0] }
+            health.currentTurnActive = currentTurnActive
+            contextHealth = health
+        }
 
         return LocalStats(
             dailyTokens: dayKeys.map {

@@ -175,6 +175,8 @@ try:
         usage_record_since_count = False
         compactions = 0
         context = None
+        current_turn_active = False
+        turn_totals = {}
 
         with lines:
             for line in lines:
@@ -203,6 +205,8 @@ try:
                     event_type = payload.get("type")
                     if event_type == "task_started":
                         current_turn = payload.get("turn_id") or str(uuid.uuid4())
+                        current_turn_active = True
+                        turn_totals.setdefault(current_turn, 0)
                         date_key = day(obj.get("timestamp"))
                         if include_conversations and date_key in daily:
                             conversations[current_turn] = {
@@ -216,6 +220,12 @@ try:
                                 "threadName": thread_names.get(thread_id),
                                 "preview": "未命名对话",
                             }
+                        continue
+
+                    if event_type == "task_complete":
+                        completed_turn = payload.get("turn_id") or current_turn
+                        if completed_turn == current_turn:
+                            current_turn_active = False
                         continue
 
                     if event_type == "user_message":
@@ -234,6 +244,9 @@ try:
                     total = total_usage.get("total_tokens") if isinstance(total_usage, dict) else None
                     if not isinstance(total, (int, float)):
                         continue
+                    total = max(0, int(total))
+                    if current_turn is not None:
+                        turn_totals[current_turn] = total
                     maximum = info.get("model_context_window")
                     last_usage = info.get("last_token_usage")
                     used = last_usage.get("total_tokens") if isinstance(last_usage, dict) else None
@@ -250,7 +263,6 @@ try:
                             "updatedAt": obj.get("timestamp"),
                             "compactions": compactions,
                         }
-                    total = int(total)
                     delta = total - previous_total if total >= previous_total else total
                     previous_total = total
                     if usage_record_since_count:
@@ -288,6 +300,8 @@ try:
                     conversation = conversations.get(turn_id)
                     turn_usage = payload.get("turn_token_usage")
                     turn_tokens = turn_usage.get("total_tokens") if isinstance(turn_usage, dict) else None
+                    if turn_id is not None and isinstance(turn_tokens, (int, float)):
+                        turn_totals[turn_id] = max(0, int(turn_tokens))
                     if conversation is not None and isinstance(turn_tokens, (int, float)):
                         conversation["tokens"] = max(0, int(turn_tokens))
                     usage_record_since_count = counted
@@ -303,6 +317,10 @@ try:
                         if context is not None and context["preview"] == "未命名任务":
                             context["preview"] = conversation["preview"]
         if context is not None:
+            context["conversationTokens"] = sum(turn_totals.values())
+            context["currentTurnId"] = current_turn
+            context["currentTurnTokens"] = turn_totals.get(current_turn) if current_turn is not None else None
+            context["currentTurnActive"] = current_turn_active
             contexts.append(context)
 except OSError:
     pass

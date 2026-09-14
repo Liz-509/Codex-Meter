@@ -153,6 +153,40 @@ enum CodexAnalyticsTests {
                     "content": [["type": "input_text", "text": "修复远程对话名称"]],
                     "internal_chat_message_metadata_passthrough": metadata
                 ]
+            ],
+            [
+                "timestamp": "2033-05-13T10:01:03Z",
+                "type": "event_msg",
+                "payload": [
+                    "type": "token_count",
+                    "info": [
+                        "model_context_window": 200_000,
+                        "last_token_usage": ["total_tokens": 80_000],
+                        "total_token_usage": ["total_tokens": 100_000]
+                    ]
+                ]
+            ],
+            [
+                "timestamp": "2033-05-13T10:01:04Z",
+                "type": "event_msg",
+                "payload": ["type": "task_complete", "turn_id": "remote-turn"]
+            ],
+            [
+                "timestamp": "2033-05-13T10:02:00Z",
+                "type": "event_msg",
+                "payload": ["type": "task_started", "turn_id": "remote-turn-next"]
+            ],
+            [
+                "timestamp": "2033-05-13T10:02:01Z",
+                "type": "event_msg",
+                "payload": [
+                    "type": "token_count",
+                    "info": [
+                        "model_context_window": 200_000,
+                        "last_token_usage": ["total_tokens": 30_000],
+                        "total_token_usage": ["total_tokens": 40_000]
+                    ]
+                ]
             ]
         ]
         let lines = try objects.map { object -> String in
@@ -192,6 +226,10 @@ enum CodexAnalyticsTests {
         let conversations = result?["conversations"] as? [[String: Any]] ?? []
         expect(conversations.first?["preview"] as? String == "修复远程对话名称", "新版远端 response_item 即使没有 content_item_kinds 也应读取用户问题")
         expect(conversations.first?["threadName"] as? String == "远端 Codex 对话标题", "对话分组应优先使用远端会话索引中的最新 Codex 标题")
+        let remoteContext = (result?["contextHealth"] as? [[String: Any]])?.first
+        expect((remoteContext?["conversationTokens"] as? NSNumber)?.intValue == 140_000, "远端对话应按轮次累计 Token")
+        expect((remoteContext?["currentTurnTokens"] as? NSNumber)?.intValue == 40_000, "远端上下文应输出当前回答 Token")
+        expect(remoteContext?["currentTurnActive"] as? Bool == true, "远端当前回答应保留实时状态")
     }
 
     private static func testContextHealthAggregation() throws {
@@ -209,7 +247,11 @@ enum CodexAnalyticsTests {
             "{\"timestamp\":\"2033-05-13T10:01:10Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"实现上下文健康度\"}}",
             "{\"timestamp\":\"2033-05-13T10:02:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":100000,\"last_token_usage\":{\"total_tokens\":85000},\"total_token_usage\":{\"total_tokens\":85000}}}}",
             "{\"timestamp\":\"2033-05-13T10:03:00Z\",\"type\":\"compacted\",\"payload\":{\"window_id\":\"window-2\",\"window_number\":2}}",
-            "{\"timestamp\":\"2033-05-13T10:04:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":100000,\"last_token_usage\":{\"total_tokens\":25000},\"total_token_usage\":{\"total_tokens\":90000}}}}"
+            "{\"timestamp\":\"2033-05-13T10:04:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":100000,\"last_token_usage\":{\"total_tokens\":25000},\"total_token_usage\":{\"total_tokens\":90000}}}}",
+            "{\"timestamp\":\"2033-05-13T10:04:01Z\",\"type\":\"token_usage_record\",\"payload\":{\"turn_id\":\"turn-health\",\"turn_token_usage\":{\"total_tokens\":90000}}}",
+            "{\"timestamp\":\"2033-05-13T10:04:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-health\"}}",
+            "{\"timestamp\":\"2033-05-13T10:05:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-next\"}}",
+            "{\"timestamp\":\"2033-05-13T10:06:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":100000,\"last_token_usage\":{\"total_tokens\":30000},\"total_token_usage\":{\"total_tokens\":40000}}}}"
         ]
         let internalLines = [
             "{\"timestamp\":\"2033-05-13T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-internal-health\",\"cwd\":\"\(project.path)\",\"source\":{\"subagent\":{\"name\":\"helper\"}}}}",
@@ -233,8 +275,11 @@ enum CodexAnalyticsTests {
         expect(rows.count == 1, "上下文健康度只应包含用户任务")
         expect(rows.first?["threadId"] as? String == "thread-health", "上下文健康度应关联任务")
         expect(rows.first?["contextWindowId"] as? String == "window-2", "压缩后应使用最新上下文窗口")
-        expect((rows.first?["usedTokens"] as? NSNumber)?.intValue == 25_000, "应使用最新窗口 Token，而非累计 Token")
-        expect((rows.first?["remainingPercent"] as? NSNumber)?.doubleValue == 75, "应计算上下文剩余比例")
+        expect((rows.first?["usedTokens"] as? NSNumber)?.intValue == 30_000, "应使用最新窗口 Token，而非累计 Token")
+        expect((rows.first?["conversationTokens"] as? NSNumber)?.intValue == 130_000, "本对话累计应为各轮最新值之和")
+        expect((rows.first?["currentTurnTokens"] as? NSNumber)?.intValue == 40_000, "应输出当前回答累计 Token")
+        expect(rows.first?["currentTurnActive"] as? Bool == true, "未完成的最新回答应标记为实时")
+        expect((rows.first?["remainingPercent"] as? NSNumber)?.doubleValue == 70, "应计算上下文剩余比例")
         expect(rows.first?["status"] as? String == "healthy", "压缩后应按新窗口恢复健康状态")
         expect((rows.first?["compactions"] as? NSNumber)?.intValue == 1, "应记录上下文压缩次数")
         service.shutdown()
@@ -247,8 +292,9 @@ enum CodexAnalyticsTests {
         defer { try? FileManager.default.removeItem(at: temporary) }
         let file = temporary.appendingPathComponent("current.jsonl")
         let lines = [
-            "{\"timestamp\":\"2033-05-13T10:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":200000,\"last_token_usage\":{\"total_tokens\":50000}}}}",
-            "{\"timestamp\":\"2033-05-13T10:01:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":200000,\"last_token_usage\":{\"total_tokens\":75000}}}}"
+            "{\"timestamp\":\"2033-05-13T10:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-a\"}}",
+            "{\"timestamp\":\"2033-05-13T10:01:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":200000,\"last_token_usage\":{\"total_tokens\":75000},\"total_token_usage\":{\"total_tokens\":95000}}}}",
+            "{\"timestamp\":\"2033-05-13T10:01:01Z\",\"type\":\"token_usage_record\",\"payload\":{\"turn_id\":\"turn-a\",\"turn_token_usage\":{\"total_tokens\":95000}}}"
         ]
         try lines.joined(separator: "\n").write(to: file, atomically: true, encoding: .utf8)
 
@@ -256,14 +302,52 @@ enum CodexAnalyticsTests {
         let first = service.contextMeasurementForTesting(file: file)
         expect((first?["usedTokens"] as? NSNumber)?.intValue == 75_000, "实时上下文应读取日志尾部的最新窗口用量")
         expect((first?["maxTokens"] as? NSNumber)?.intValue == 200_000, "实时上下文应读取模型窗口上限")
+        expect((first?["conversationTokens"] as? NSNumber)?.intValue == 95_000, "实时读取应同时返回当前对话累计 Token")
+        expect((first?["currentTurnTokens"] as? NSNumber)?.intValue == 95_000, "实时读取应返回本轮回答累计 Token")
+        expect(first?["currentTurnActive"] as? Bool == true, "回答进行中应标记为实时")
 
-        let appended = "\n{\"timestamp\":\"2033-05-13T10:02:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":200000,\"last_token_usage\":{\"total_tokens\":90000}}}}"
+        let appended = "\n{\"timestamp\":\"2033-05-13T10:01:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-a\"}}\n{\"timestamp\":\"2033-05-13T10:01:03Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-b\"}}\n{\"timestamp\":\"2033-05-13T10:02:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":200000,\"last_token_usage\":{\"total_tokens\":20000},\"total_token_usage\":{\"total_tokens\":25000}}}}"
         let handle = try FileHandle(forWritingTo: file)
         try handle.seekToEnd()
         try handle.write(contentsOf: Data(appended.utf8))
         try handle.close()
         let second = service.contextMeasurementForTesting(file: file)
-        expect((second?["usedTokens"] as? NSNumber)?.intValue == 90_000, "会话文件增长后应立即更新上下文用量")
+        expect((second?["usedTokens"] as? NSNumber)?.intValue == 20_000, "会话文件增长后应立即更新上下文用量")
+        expect((second?["conversationTokens"] as? NSNumber)?.intValue == 120_000, "会话文件增长后应立即更新当前对话累计 Token")
+        expect((second?["currentTurnTokens"] as? NSNumber)?.intValue == 25_000, "新一轮应从自己的累计值开始")
+
+        let partial = "{\"timestamp\":\"2033-05-13T10:02:01Z\",\"type\":\"token_usage_record\",\"payload\":{\"turn_id\":\"turn-b\",\"turn_token_usage\":{\"total_tokens\":40000}}}"
+        let midpoint = partial.index(partial.startIndex, offsetBy: partial.count / 2)
+        let partialHandle = try FileHandle(forWritingTo: file)
+        try partialHandle.seekToEnd()
+        try partialHandle.write(contentsOf: Data(("\n" + partial[..<midpoint]).utf8))
+        try partialHandle.close()
+        let unchanged = service.contextMeasurementForTesting(file: file)
+        expect((unchanged?["currentTurnTokens"] as? NSNumber)?.intValue == 25_000, "半行 JSON 不得提前改变实时值")
+
+        let completionHandle = try FileHandle(forWritingTo: file)
+        try completionHandle.seekToEnd()
+        try completionHandle.write(contentsOf: Data((partial[midpoint...] + "\n").utf8))
+        try completionHandle.close()
+        let completedLine = service.contextMeasurementForTesting(file: file)
+        expect((completedLine?["currentTurnTokens"] as? NSNumber)?.intValue == 40_000, "补全 JSON 后应从缓存偏移继续读取")
+        expect((completedLine?["conversationTokens"] as? NSNumber)?.intValue == 135_000, "同一轮更新不得重复累加")
+
+        let completeHandle = try FileHandle(forWritingTo: file)
+        try completeHandle.seekToEnd()
+        try completeHandle.write(contentsOf: Data("{\"timestamp\":\"2033-05-13T10:02:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-b\"}}\n".utf8))
+        try completeHandle.close()
+        let finished = service.contextMeasurementForTesting(file: file)
+        expect(finished?["currentTurnActive"] as? Bool == false, "回答完成后应保留最终值并切换状态")
+
+        let replacement = [
+            "{\"timestamp\":\"2033-05-13T11:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-c\"}}",
+            "{\"timestamp\":\"2033-05-13T11:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"model_context_window\":200000,\"last_token_usage\":{\"total_tokens\":8000},\"total_token_usage\":{\"total_tokens\":10000}}}}"
+        ].joined(separator: "\n")
+        try replacement.write(to: file, atomically: false, encoding: .utf8)
+        let reset = service.contextMeasurementForTesting(file: file)
+        expect((reset?["conversationTokens"] as? NSNumber)?.intValue == 10_000, "日志截断后应清空旧轮次并重新扫描")
+        expect((reset?["currentTurnTokens"] as? NSNumber)?.intValue == 10_000, "日志截断后的新轮次应正确读取")
         service.shutdown()
     }
 

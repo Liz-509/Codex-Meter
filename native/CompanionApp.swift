@@ -683,6 +683,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             "menuBar": true,
             "reportExport": true,
             "contextHealth": true,
+            "currentConversationTokens": true,
             "notificationPromptNeeded": !defaults.bool(forKey: "notificationPromptSeen"),
             "remoteSessionMonitoring": true,
             "remoteSessionMonitoringEnabled": remoteSettings["enabled"] as? Bool ?? false,

@@ -6,6 +6,7 @@ Windows 已完成与 macOS 的 P0/P1 功能对齐：90 天用量洞察、项目/
 
 ## 后续待开发（更新于 2026-09-14）
 
+- [ ] 接入“本轮回答 / 当前对话 Tokens”：优先从 `token_usage_record.turn_token_usage.total_tokens` 读取本轮累计，旧日志回退 `token_count.info.total_token_usage.total_tokens`；按任务内各 `turnId` 的最新值求和得到本对话累计。在约 2 秒实时回调和完整快照中输出 `conversationTokens`、`currentTurnId`、`currentTurnTokens`、`currentTurnActive`，并启用 `capabilities.currentConversationTokens`。共享 UI 与数字动画已完成；启用前 Windows 继续显示原上下文健康度圆盘。
 - [ ] 在 Windows 设置页加入“监控 SSH 对话”开关、刷新延时提示和首次发现连接时的引导；默认关闭。
 - [ ] 识别由 Windows 版 Codex 建立且当前仍有效的 OpenSSH 连接，按实际远端地址去重，断开后及时更新连接数量。
 - [ ] 仅在开关开启时读取当前已连接服务器的 Codex 会话；保存但未连接的服务器不得参与刷新或产生连接超时。
