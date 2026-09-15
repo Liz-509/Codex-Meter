@@ -8,7 +8,7 @@ Codex Meter 是一款适用于 macOS 和 Windows 的轻量级 Codex 原生用量
 
 ## 下载与安装
 
-- [macOS Apple Silicon 安装包 — Codex Meter v1.4.7](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.7/Codex-Meter-macOS-arm64-v1.4.7.dmg)
+- [macOS Apple Silicon 安装包 — Codex Meter v1.4.9](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.9/Codex-Meter-macOS-arm64-v1.4.9.dmg)
 - [Windows 10/11 x64 安装包 — Codex Meter v1.4.8](https://github.com/Liz-509/Codex-Meter/releases/download/v1.4.8/Codex-Meter-Windows-x64-v1.4.8.exe)
 
 macOS 用户打开下载的 DMG，将 `Codex Meter` 拖到“应用程序”快捷方式，再从“应用程序”中启动。Windows 用户打开下载的安装 EXE 并按提示操作；可以选择安装位置以及是否创建桌面快捷方式。轻量安装程序只会在系统缺失依赖时下载 .NET 8 Desktop Runtime 和共享 Windows App Runtime，因此首次安装可能需要联网；随后会添加开始菜单入口，并注册到 Windows“已安装的应用”。卸载 Codex Meter 时不会移除共享运行时；卸载程序可选择保留或移除应用偏好设置，不会影响 Codex 会话。Intel Mac 用户可以从源码构建安装包。

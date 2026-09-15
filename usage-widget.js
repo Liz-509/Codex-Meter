@@ -1349,11 +1349,25 @@ class CodexUsageWidget extends HTMLElement {
     return Array.isArray(this.data.contextHealth?.sessions) ? this.data.contextHealth.sessions : [];
   }
 
+  contextHealthSessionKey(session) {
+    const id = String(session?.threadId || session?.taskId || session?.contextWindowId || "").trim();
+    if (!id) return "";
+    const source = String(session?.sourceHost || "local").trim() || "local";
+    return `${source}\u0000${id}`;
+  }
+
+  isCurrentContextHealthSession(session, current = this.currentContextHealthSession()) {
+    if (!session || !current) return false;
+    const currentKey = this.contextHealthSessionKey(current);
+    return currentKey ? this.contextHealthSessionKey(session) === currentKey : session === current;
+  }
+
   currentContextHealthSession() {
     const currentTaskId = String(this.data.contextHealth?.currentTaskId || "");
     const sessions = this.contextHealthSessions();
     if (!currentTaskId) return null;
-    const current = sessions.find((session) => String(session.threadId || session.taskId || "") === currentTaskId) || null;
+    const current = sessions.find((session) => !session?.sourceHost
+      && String(session.threadId || session.taskId || "") === currentTaskId) || null;
 
     // The local App Server cannot list a task that is running through an SSH host,
     // so currentTaskId can remain pinned to the last local task while the remote
@@ -1470,10 +1484,10 @@ class CodexUsageWidget extends HTMLElement {
     const list = this.shadowRoot.querySelector(".context-health-list");
     const summary = this.shadowRoot.querySelector(".context-health-dialog-summary");
     if (!list || !summary) return;
-    const currentTaskId = String(this.data.contextHealth?.currentTaskId || "");
+    const currentSession = this.currentContextHealthSession();
     const sessions = [...this.contextHealthSessions()].sort((left, right) => {
-      const leftCurrent = String(left.threadId || left.taskId || "") === currentTaskId;
-      const rightCurrent = String(right.threadId || right.taskId || "") === currentTaskId;
+      const leftCurrent = this.isCurrentContextHealthSession(left, currentSession);
+      const rightCurrent = this.isCurrentContextHealthSession(right, currentSession);
       if (leftCurrent !== rightCurrent) return leftCurrent ? -1 : 1;
       return String(right.lastActive || "").localeCompare(String(left.lastActive || ""));
     });
@@ -1491,7 +1505,7 @@ class CodexUsageWidget extends HTMLElement {
       const currentTurnTokens = this.numericValue(session.currentTurnTokens);
       const project = session.projectName || "非项目中对话";
       const compactions = Math.max(0, Number(session.compactions) || 0);
-      const isCurrent = String(session.threadId || session.taskId || "") === currentTaskId;
+      const isCurrent = this.isCurrentContextHealthSession(session, currentSession);
       const turnTotal = currentTurnTokens == null ? "" : ` · 本轮 ${this.escapeHTML(this.formatNumber(currentTurnTokens))}`;
       const conversationTotal = conversationTokens == null ? "" : `<span class="context-conversation-total">本对话 ${this.escapeHTML(this.formatNumber(conversationTokens))} Tokens${turnTotal}</span>`;
       return `<article class="context-health-item is-${this.escapeHTML(health.status)}${isCurrent ? " is-current" : ""}"><div class="context-health-heading"><span><strong>${this.escapeHTML(session.name || "未命名任务")}${isCurrent ? '<em>当前对话</em>' : ""}</strong><small>${this.escapeHTML(project)} · ${this.escapeHTML(this.shortDateTime(session.lastActive))}</small></span><b>${Math.round(health.remaining)}%</b></div><div class="context-health-track"><i style="width:${health.used}%"></i></div><div class="context-health-meta"><span>${this.escapeHTML(health.label)} · 已用 ${this.escapeHTML(this.formatExactNumber(usedTokens))} / ${this.escapeHTML(this.formatExactNumber(maxTokens))}</span><span>${compactions ? `已压缩 ${compactions} 次` : "尚未压缩"}</span></div>${conversationTotal}</article>`;
@@ -2115,8 +2129,10 @@ class CodexUsageWidget extends HTMLElement {
       .collapsed .initial-loading-stars { top:calc(var(--compact-y) + 33px); left:calc(var(--compact-x) + 33px); transform:translate(-50%,-50%) scale(.78); }
       .initial-loading-star { position:absolute; display:grid; place-items:center; color:var(--loading-star-start); transform-origin:center; }
       .initial-loading-star svg { display:block; width:100%; height:100%; fill:url(#initial-loading-star-gradient); }
-      .initial-loading-star-main { top:14px; left:14px; width:30px; height:30px; animation:initial-star-breathe 1.8s cubic-bezier(.45,0,.25,1) infinite; }
-      .initial-loading-star-small { opacity:.72; animation:initial-star-glint 1.65s ease-in-out infinite; }
+      .initial-loading-star-main { top:14px; left:14px; width:30px; height:30px; }
+      .initial-loading-star-small { opacity:.72; }
+      .initial-loading .initial-loading-star-main { animation:initial-star-breathe 1.8s cubic-bezier(.45,0,.25,1) infinite; }
+      .initial-loading .initial-loading-star-small { animation:initial-star-glint 1.65s ease-in-out infinite; }
       .initial-loading-star-one { top:4px; right:5px; width:12px; height:12px; animation-delay:-.2s; }
       .initial-loading-star-two { bottom:7px; left:5px; width:9px; height:9px; animation-delay:-1s; }
       .visually-hidden { position:absolute!important; width:1px!important; height:1px!important; padding:0!important; margin:-1px!important; overflow:hidden!important; clip:rect(0,0,0,0)!important; white-space:nowrap!important; border:0!important; }

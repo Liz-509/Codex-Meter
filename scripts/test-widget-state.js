@@ -67,6 +67,10 @@ assert.match(macColdStartWidget.shadowRoot.innerHTML, /context-health-summary is
 assert.match(macColdStartWidget.shadowRoot.innerHTML, /live-badge is-complete">等待/, "无数据首屏不得把本轮回答误报为已完成或实时");
 assert.match(macColdStartWidget.shadowRoot.innerHTML, /section class="widget[^"]*initial-loading[^"]*"[^>]*aria-busy="true"/, "原生冷启动应启用首次加载遮罩和 aria-busy");
 assert.match(macColdStartWidget.shadowRoot.innerHTML, /class="initial-loading-overlay" role="status"[^>]*aria-hidden="false"/, "原生冷启动遮罩应提供可访问的加载状态");
+assert.match(macColdStartWidget.styles, /\.initial-loading \.initial-loading-star-main \{ animation:initial-star-breathe/, "主星动画只应在冷启动状态运行");
+assert.match(macColdStartWidget.styles, /\.initial-loading \.initial-loading-star-small \{ animation:initial-star-glint/, "小星动画只应在冷启动状态运行");
+assert.doesNotMatch(macColdStartWidget.styles, /\n\s+\.initial-loading-star-main \{[^}]*animation:/, "冷启动退出后主星不应保留动画");
+assert.doesNotMatch(macColdStartWidget.styles, /\n\s+\.initial-loading-star-small \{[^}]*animation:/, "冷启动退出后小星不应保留动画");
 delete sandbox.codexMeterInitialCapabilities;
 
 const widget = new Widget();
@@ -480,9 +484,31 @@ assert.equal(remoteContextSummary.available, true, "SSH 当前任务存在上下
 assert.equal(remoteContextSummary.detail, "当前 SSH 任务", "本机 App Server 仍指向旧任务时应展示更新的 SSH 上下文");
 assert.equal(remoteContextSummary.remaining, 30, "SSH 当前任务的剩余上下文比例应显示在主卡片");
 
+const remoteContextList = { innerHTML: "" };
+const remoteContextListSummary = { textContent: "" };
+remoteContextSummaryWidget.shadowRoot.querySelector = (selector) => selector === ".context-health-list"
+  ? remoteContextList
+  : selector === ".context-health-dialog-summary"
+    ? remoteContextListSummary
+    : null;
+remoteContextSummaryWidget.renderContextHealth();
+assert.match(remoteContextList.innerHTML, /<strong>当前 SSH 任务<em>当前对话<\/em><\/strong>/, "详情应把主卡片选中的 SSH 任务标为当前对话");
+assert.doesNotMatch(remoteContextList.innerHTML, /<strong>上一个本机任务<em>当前对话<\/em><\/strong>/, "详情不得把 App Server 中残留的本机任务标为当前对话");
+assert.ok(remoteContextList.innerHTML.indexOf("当前 SSH 任务") < remoteContextList.innerHTML.indexOf("上一个本机任务"), "详情应把当前 SSH 任务排在首位");
+
 remoteContextSummaryWidget.data.contextHealth.sessions[0].lastActive = "2033-05-13T10:10:00Z";
 remoteContextSummary = remoteContextSummaryWidget.contextHealthSummaryState();
 assert.equal(remoteContextSummary.detail, "上一个本机任务", "切回并继续本机任务后应恢复精确匹配的本机上下文");
+
+const duplicateTaskIdWidget = new Widget();
+duplicateTaskIdWidget.data.contextHealth = {
+  currentTaskId: "shared-task-id",
+  sessions: [
+    { threadId: "shared-task-id", sourceHost: "Build Box", name: "同 ID 远端任务", lastActive: "2033-05-13T10:10:00Z" },
+    { threadId: "shared-task-id", name: "同 ID 本机任务", lastActive: "2033-05-13T10:10:00Z" },
+  ],
+};
+assert.equal(duplicateTaskIdWidget.currentContextHealthSession().name, "同 ID 本机任务", "本机 currentTaskId 不得误匹配同 ID 的 SSH 任务");
 
 widget.updateCurrentContextHealth({
   contextHealth: {
